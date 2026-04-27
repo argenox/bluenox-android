@@ -11,6 +11,7 @@ BlueNox is a Kotlin-first Android BLE library focused on reliable scan/connect/G
 
 ## Table of contents
 
+- [Overview](#overview)
 - [Features](#features)
 - [Requirements](#requirements)
 - [Installation](#installation)
@@ -21,6 +22,14 @@ BlueNox is a Kotlin-first Android BLE library focused on reliable scan/connect/G
 - [Tags / topics](#tags--topics)
 - [License](#license)
 
+## Overview
+
+We built the original Android BlueNox library back in 2015, when Android 4 Bluetooth Stack
+had every kind of issue you could imagine. We've updated it in the years since to support
+every version.
+
+A few years ago we modernized the library to Kotlin and began shipping that version in application. We're releasing it because we want to make it easier for devleopers to write amazing BLE enabled applications.
+
 ## Features
 
 - BLE scanning with optional filters (address, UUID, manufacturer ID, AD type).
@@ -30,16 +39,17 @@ BlueNox is a Kotlin-first Android BLE library focused on reliable scan/connect/G
 - Kotlin `SharedFlow` adapter for coroutine-first event consumption.
 - Beacon frame decoding helpers (iBeacon, Eddystone variants).
 - Diagnostics and test-oriented mock BLE harness support.
+- Broad Android Support - Android API 24+ Android 7.0 to Android 15
 
 ## Requirements
 
-- Android API 24+
+- Android API 24+ - Android 7.0 to Android 15
 - Kotlin Android project
 - BLE-capable device and runtime BLE permissions granted by user
 
 ## Installation
 
-If published to your artifact repository:
+You can easily integrate the repo from the artifact repository:
 
 ```kotlin
 dependencies {
@@ -47,7 +57,6 @@ dependencies {
 }
 ```
 
-For local development in this repository, include and depend on module `:bluenox-android`.
 
 ## Permissions
 
