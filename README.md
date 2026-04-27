@@ -17,7 +17,6 @@ BlueNox is a Kotlin-first Android BLE library focused on reliable scan/connect/G
 - [Documentation map](#documentation-map)
 - [Use cases](#use-cases)
 - [Tags / topics](#tags--topics)
-- [Contributing](#contributing)
 - [License](#license)
 
 ## Features
@@ -92,12 +91,6 @@ This README is intentionally concise. Use the companion docs for full details:
 ## Tags / topics
 
 `android` `ble` `bluetooth-low-energy` `kotlin` `gatt` `scan` `connect` `notifications` `mtu` `beacon` `eddystone` `ibeacon` `dfu`
-
-## Contributing
-
-- Keep public API changes reflected in `API_REFERENCE.md`.
-- Add runnable usage snippets to `LIBRARY_USAGE_GUIDE.md` for new features.
-- Preserve backward compatibility where possible, or document migration notes clearly.
 
 ## License
 
