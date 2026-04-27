@@ -68,3 +68,14 @@ jobs:
           ORG_GRADLE_PROJECT_ossrhUsername: ${{ secrets.OSSRH_USERNAME }}
           ORG_GRADLE_PROJECT_ossrhPassword: ${{ secrets.OSSRH_PASSWORD }}
         run: ./gradlew publishReleasePublicationToMavenCentralRepository --stacktrace --no-daemon
+
+      - name: Upload OSSRH staging repo to Central Portal
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_to_maven }}
+        env:
+          CENTRAL_PORTAL_USERNAME: ${{ secrets.CENTRAL_PORTAL_USERNAME }}
+          CENTRAL_PORTAL_PASSWORD: ${{ secrets.CENTRAL_PORTAL_PASSWORD }}
+        run: |
+          TOKEN=$(printf "%s:%s" "$CENTRAL_PORTAL_USERNAME" "$CENTRAL_PORTAL_PASSWORD" | base64 | tr -d '\n')
+          curl -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            "https://ossrh-staging-api.central.sonatype.com/manual/upload/defaultRepository/com.argenox?publishing_type=user_managed"
