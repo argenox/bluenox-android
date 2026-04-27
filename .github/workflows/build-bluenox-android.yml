@@ -6,10 +6,17 @@ on:
   pull_request:
     branches: [master]
   workflow_dispatch:
+    inputs:
+      publish_to_maven:
+        description: "Publish release to Maven Central instead of build-only"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build-aar:
     runs-on: ubuntu-latest
+    environment: main
     permissions:
       contents: read
     steps:
@@ -26,11 +33,38 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build release AAR
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.publish_to_maven) }}
         run: ./gradlew assembleRelease --stacktrace --no-daemon
 
       - name: Upload AAR artifact
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.publish_to_maven) }}
         uses: actions/upload-artifact@v4
         with:
           name: bluenox-android-aar
           path: build/outputs/aar/*.aar
           if-no-files-found: error
+
+      - name: Validate Sonatype secrets
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_to_maven }}
+        env:
+          CENTRAL_PORTAL_USERNAME: ${{ secrets.CENTRAL_PORTAL_USERNAME }}
+          CENTRAL_PORTAL_PASSWORD: ${{ secrets.CENTRAL_PORTAL_PASSWORD }}
+        run: |
+          if [ -z "$CENTRAL_PORTAL_USERNAME" ] || [ -z "$CENTRAL_PORTAL_PASSWORD" ]; then
+            echo "Missing CENTRAL_PORTAL_USERNAME or CENTRAL_PORTAL_PASSWORD secret"
+            exit 1
+          fi
+          echo "Central Portal username provided (length: ${#CENTRAL_PORTAL_USERNAME})"
+
+      - name: Publish to Maven Central
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_to_maven }}
+        env:
+          CENTRAL_PORTAL_USERNAME: ${{ secrets.CENTRAL_PORTAL_USERNAME }}
+          CENTRAL_PORTAL_PASSWORD: ${{ secrets.CENTRAL_PORTAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.GPG_SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.GPG_PASSWORD }}
+          ORG_GRADLE_PROJECT_centralPortalUsername: ${{ secrets.CENTRAL_PORTAL_USERNAME }}
+          ORG_GRADLE_PROJECT_centralPortalPassword: ${{ secrets.CENTRAL_PORTAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_ossrhUsername: ${{ secrets.OSSRH_USERNAME }}
+          ORG_GRADLE_PROJECT_ossrhPassword: ${{ secrets.OSSRH_PASSWORD }}
+        run: ./gradlew publishReleasePublicationToMavenCentralRepository --stacktrace --no-daemon
