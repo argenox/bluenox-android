@@ -1,4 +1,6 @@
-![BlueNox Library Banner](assets/bluenox-lib.png)
+<p align="center">
+  <img src="assets/bluenox-lib.png" alt="BlueNox Library Banner" />
+</p>
 
 # BlueNox Android BLE Library
 
