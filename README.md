@@ -1,3 +1,5 @@
+![BlueNox Library Banner](assets/bluenox-lib.png)
+
 # BlueNox Android BLE Library
 
 [![Platform](https://img.shields.io/badge/platform-Android-brightgreen.svg)](https://developer.android.com/)
@@ -5,7 +7,6 @@
 [![Language](https://img.shields.io/badge/language-Kotlin-orange.svg)](https://kotlinlang.org/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-lightgrey.svg)](LICENSE)
 
-![BlueNox Library Banner](assets/bluenox-lib.png)
 
 BlueNox is a Kotlin-first Android BLE library focused on reliable scan/connect/GATT operations with structured failure handling, callback and Flow APIs, and optional beacon/DFU-oriented workflows.
 
@@ -57,6 +58,13 @@ dependencies {
 }
 ```
 
+Example
+
+```kotlin
+dependencies {
+    implementation("com.argenox:bluenox-android:0.2.52")
+}
+```
 
 ## Permissions
 
@@ -69,6 +77,56 @@ Recommended pattern:
 3. Initialize only after permissions are granted.
 
 On newer Android versions, Bluetooth runtime permissions are required; location requirements vary by API level and scan behavior.
+
+### Android Permissions: API Level, Scan Behavior, and Required Runtime Permissions
+
+The permissions your app needs for BLE operations will depend on both the Android API level **and** how you are scanning for devices. Incorrect permissions may cause scanning/connection failures or deliver empty scan results.
+
+#### Minimum Permissions by API Level
+
+| API Level | Core Required Permissions                                              | Notes                                                   |
+|-----------|----------------------------------------------------------------------|---------------------------------------------------------|
+| 24–30     | `BLUETOOTH`, `BLUETOOTH_ADMIN`, `ACCESS_FINE_LOCATION` \*             | Location required for most scans                        |
+| 31+       | `BLUETOOTH_SCAN`, `BLUETOOTH_CONNECT` (**new**), `ACCESS_FINE_LOCATION` \* | Bluetooth Scan/Connect mandatory starting API 31 (Android 12+) |
+
+\* For background scanning and some beacon scans, you may also need `ACCESS_BACKGROUND_LOCATION`.
+
+#### Scan Behavior and Location Permission
+
+Starting with Android 6.0 (API 23), **location permission is required** for scanning and discovering BLE devices not explicitly marked as "owned" devices.  
+- For most **foreground BLE scanning**, `ACCESS_FINE_LOCATION` is required (or `ACCESS_COARSE_LOCATION` on some old targeting).
+- For **foreground scanning** on Android 12+ (API 31+), you must also request the new `BLUETOOTH_SCAN` permission with runtime consent.
+- For **background scanning**, request `ACCESS_BACKGROUND_LOCATION` as well.
+
+#### Example Permission Requests
+
+- **AndroidManifest.xml**:
+    ```xml
+    <!-- Up to API 30 -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
+    <!-- API 31+ -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- Optional: -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    ```
+
+- **Runtime Permission Prompt**:
+    - Request permissions at runtime using `ActivityCompat.requestPermissions`, as **manifest-only declarations are not sufficient** on Android 6+.
+
+#### Additional Notes
+
+- If you only connect to paired/Bonded devices and never scan, location permissions may be avoided.  
+- Background and foreground service permissions may also be needed for persistent long-running BLE connections/scans.
+- Always check your target and minSdk versions, since Google Play requirements may enforce permission usage disclosure best practices.
+
+See also:  
+- [Android Bluetooth Permissions (official docs)](https://developer.android.com/guide/topics/connectivity/bluetooth/permissions)
+- [Bluetooth and location](https://developer.android.com/guide/topics/connectivity/bluetooth/permissions#permissions-bluetooth-scan)
 
 ## Quick start
 
