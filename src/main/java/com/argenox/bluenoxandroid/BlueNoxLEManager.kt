@@ -1,0 +1,1604 @@
+package com.argenox.bluenoxandroid
+/*
+ * Copyright (c) 2015-2026, Argenox Technologies LLC
+ *
+ * Licensed under the terms in the LICENSE file at the module root.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL ARGENOX TECHNOLOGIES LLC BE LIABLE FOR ANY
+ * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * File:    BluenoxLEManager.kt
+ * Summary: BlueNox LE Manager
+ *
+ **********************************************************************************/
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothA2dp
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothHeadset
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
+import android.bluetooth.le.BluetoothLeScanner
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
+import android.content.Context
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.CountDownTimer
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import androidx.core.content.ContextCompat
+import com.argenox.bluenoxandroid.BlueNoxDebug.DebugLevels
+import com.argenox.bluenoxandroid.BlueNoxDevice
+import com.argenox.bluenoxandroid.BlueNoxDeviceCallbacks
+import com.argenox.bluenoxandroid.BlueNoxDeviceStore
+import com.argenox.bluenoxandroid.BluenoxGATTCallback
+import android.content.BroadcastReceiver
+import android.content.Intent
+import android.os.ParcelUuid
+import androidx.core.content.ContextCompat.registerReceiver
+import com.argenox.bluenoxandroid.BLEUUIDs
+import com.argenox.bluenoxandroid.ProximityEngine
+import java.lang.reflect.Method
+import java.nio.ByteBuffer
+import java.time.Duration
+import java.time.Instant
+import java.util.UUID
+import java.util.concurrent.ArrayBlockingQueue
+import kotlin.concurrent.thread
+
+
+/**
+ * BlueNox Classic Manager
+ *
+ * This module provides management capabilities for Bluetooth Classic devices
+ * such as those supporting SPP, A2DP and HFP/HSP profiles.
+ *
+ * The class is implemented as a singleton and only one instance of the class will be
+ * available which can be accessed by calling BluenoxClassicManager.getInstance()
+ *
+ */
+public class BluenoxLEManager
+{
+    private val mProximityEngine: ProximityEngine? = null
+
+    private var isScanning: Boolean = false
+    private var useLegacyScanning = true
+    private var mBlueNoxDeviceStore: BlueNoxDeviceStore? = null
+
+    private var mCurFilters: List<ScanFilter>? = null
+    private var mCurSettings: ScanSettings? = null
+    private var scanManufacturerIdFilter: Int? = null
+    private var scanAdvertisingDataTypeFilter: Int? = null
+
+    private var mActiveDevice : BlueNoxDevice? = null
+
+    /* defines (in milliseconds) how often RSSI should be updated */
+    private val RSSI_UPDATE_TIME_INTERVAL = 1500 // 1.5 seconds
+    private var SCAN_PERIOD: Long         = 10000 /* Maximum time for scan to le: Device Found:ast */
+
+    private var mdeviceClass: Class<*>? = null
+
+    private val dbgObj = BlueNoxDebug(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_ERROR)
+
+    private class BluenoxDebugItem(
+        val functionName: String,
+        val lineNumber: Int,
+        val timestamp: Instant,
+        val message: String,
+        val lvl: BlueNoxDebug.DebugLevels
+    )
+    {
+
+        fun intToBytes(i: Int): ByteArray =
+            ByteBuffer.allocate(Int.SIZE_BYTES).putInt(i).array()
+
+        fun longToBytes(i: Long): ByteArray =
+            ByteBuffer.allocate(Long.SIZE_BYTES).putLong(i).array()
+
+        fun getBytes() :ByteArray
+        {
+            var array : ByteArray = byteArrayOf(0xaa.toByte(), 0x55)
+            array += longToBytes(timestamp.toEpochMilli())
+            array += intToBytes(lvl.ordinal)
+            array += functionName.toByteArray()
+            array += intToBytes(lineNumber)
+            array += message.toByteArray()
+
+            return array
+        }
+    }
+
+    private class BluenoxDebugLog
+    {
+        val debugLogList = ArrayList<BluenoxDebugItem>();
+        var tracingEnabled : Boolean= false
+
+        fun getBytes() : ByteArray
+        {
+            var array = byteArrayOf(0xaa.toByte(), 0x55)
+
+            for(item in debugLogList)
+            {
+                array += item.getBytes()
+            }
+
+            return array
+        }
+
+        fun add(item: BluenoxDebugItem)
+        {
+            debugLogList.add(item)
+        }
+
+        fun setTracing(enabled: Boolean)
+        {
+            tracingEnabled = enabled
+        }
+    }
+
+    /**
+     * Events handled in Callback
+     *
+     */
+    private enum class BluenoxDeviceState(val evt: Int) {
+
+        /** BlueNox Device Disconnected */
+        BLUENOX_DEVICE_STATE_DISCONNECTED(0),
+
+        /** BlueNox Device Connecting */
+        BLUENOX_DEVICE_STATE_CONNECTING(1),
+
+        /** BlueNox Device Connecting */
+        BLUENOX_DEVICE_STATE_CONNECTED(2),
+    }
+
+    /**
+     * Events handled in Callback
+     *
+     */
+    private enum class BluenoxThreadEvents(val evt: Int)
+    {
+
+        /**
+         * BlueNox Initialization Complete
+         *
+         * Called when BlueNox initialization is complete and it is ready to have
+         * APIs called
+         */
+        BLUENOX_THREAD_EVT_TIMER_TICK(0),
+
+        /**
+         * BlueNox Initialization Complete
+         *
+         * Called when BlueNox initialization is complete and it is ready to have
+         * APIs called
+         */
+        BLUENOX_THREAD_EVT_TIMER_FINISH(1),
+
+        /**
+         * Device Connected Event
+         *
+         * Called when a device connects successfully
+         */
+        BLUENOX_THREAD_EVT_EVT(2),
+
+        /**
+         * BlueNox Discovery Done Timer Event
+         *
+         */
+        BLUENOX_THREAD_EVT_DISCOVERY_TIMER_DONE(3),
+    }
+
+
+    /**
+     * Events handled in Callback
+     *
+     */
+    public enum class BluenoxEvents(val evt: Int) {
+
+        /**
+         * BlueNox Initialization Complete
+         *
+         * Called when BlueNox initialization is complete and it is ready to have
+         * APIs called
+         */
+        BLUENOX_EVT_INIT_COMPLETE(0),
+
+        /**
+         * Scanning Started
+         *
+         * Called when a device connects successfully
+         */
+        BLUENOX_EVT_SCAN_START(1),
+
+
+        /**
+         * Scanning Stopped
+         *
+         * Called when a device connects successfully
+         */
+
+        BLUENOX_EVT_SCAN_STOP(2),
+
+        /**
+         * Device Connection Failed Event
+         *
+         * Called when a device connection fails or times out, either the device
+         * is unreachable or another error has occurred
+         */
+        BLUENOX_EVT_DEVICE_FOUND(3),
+
+        /**
+         * Device Connected Event
+         *
+         * Called when a device connects successfully
+         */
+        BLUENOX_EVT_DEVICE_CONNECTED(4),
+
+
+
+        /**
+         * Device Connection Failed Event
+         *
+         * Called when a device connection fails or times out, either the device
+         * is unreachable or another error has occurred
+         */
+        BLUENOX_EVT_DEVICE_CONNECTION_FAILED(5),
+
+        /**
+         * Device Disconnected Event
+         *
+         * Called when a device connection fails or times out, either the device
+         * is unreachable or another error has occurred
+         */
+        BLUENOX_EVT_DEVICE_DISCONNECTED(6),
+
+        /**
+         * Device Bonded Event
+         *
+         * Called when a device has successfully bonded
+         */
+        BLUENOX_EVT_DEVICE_BONDED(7),
+
+        /**
+         * Device Unbonded Event
+         *
+         * Called when a device bond has been removed
+         */
+        BLUENOX_EVT_DEVICE_UNBONDED(8),
+
+        /**
+         * Device Audio Connected Event
+         *
+         * Called when a device's audio connection has connected
+         */
+        BLUENOX_EVT_DEVICE_AUDIO_CONNECTED(9),
+
+        /**
+         * Device Audio Disconnected Event
+         *
+         * Called when a device's audio connection has disconnection
+         */
+
+        BLUENOX_EVT_DEVICE_AUDIO_DISCONNECTED(10),
+
+        /**
+         * Discovery Completed
+         *
+         * Called when the device discovery process has completed and devices may be available
+         */
+
+        BLUENOX_EVT_DISCOVERY_COMPLETE(11),
+    }
+
+    /**
+     * BlueNox Device Type
+     *
+     */
+    public enum class BluenoxDeviceType(val type: Int) {
+        BLUENOX_TYPE_UNKNOWN(0),
+        BLUENOX_TYPE_BT_LE(1),
+        BLUENOX_TYPE_BT_CLASSIC(2),
+        BLUENOX_TYPE_BT_DUAL(3),
+    }
+
+    /**
+     * BlueNox Device Audio
+     *
+     */
+    public enum class BluenoxAudioType(val type: Int) {
+        BLUENOX_AUDIO_NONE(0),
+        BLUENOX_AUDIO_UNKNOWN(1),
+        BLUENOX_AUDIO_HEADSET(2),
+        BLUENOX_AUDIO_A2DP(3),
+    }
+
+    public  class BlueNoxClassicDevice(var n: String?, var addr: String?, var t: BluenoxDeviceType, var a: BluenoxAudioType) {
+        var name = n
+        var address = addr
+        var type = t
+        var audioConnected = false
+        var audioType = a
+
+        fun setAudioConnectionState(connected: Boolean)
+        {
+            audioConnected = connected
+        }
+    }
+
+    private class BlueNoxClassicDeviceInternal(var name: String?, var addr: String?, var needsConn: Boolean, var dev: BluetoothDevice?) {
+        var connected: Boolean = false
+        var needsConnection: Boolean = needsConn
+        lateinit var connectionStartTimestamp : Instant
+        var state: BluenoxDeviceState = BluenoxDeviceState.BLUENOX_DEVICE_STATE_DISCONNECTED
+
+        fun startConnection()
+        {
+            connectionStartTimestamp = Instant.now()
+            state = BluenoxDeviceState.BLUENOX_DEVICE_STATE_CONNECTING
+        }
+    }
+
+    /**
+     * Provides the version of the BlueNox Classic Manager
+     *
+     */
+    fun getVersion(): String {
+        return version
+    }
+
+
+
+    @SuppressLint("MissingPermission")
+    private fun startDeviceDiscovery()
+    {
+        val result = bluetoothAdapter.startDiscovery();
+        if(result)
+        {
+            dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_DEBUG, MODULE_TAG,
+                "Discovery Started")
+        }
+        else
+        {
+            dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_DEBUG, MODULE_TAG,
+                "Discovery Start Failed")
+        }
+    }
+
+
+
+    /**
+     * Registers an event callback handler to the manager
+     *
+     * The callback will be notified of the events specified by BluenoxEvents
+     *
+     * This functions ensures that all necessary permissions have been
+     *
+     * @param handler is the callback handler function being registered
+     *
+     */
+    public fun registerCallback(handler: (evt: BluenoxEvents, String, String) -> Unit) {
+
+        callbackList.add(handler)
+    }
+
+    /**
+     * Unregisters an event callback
+     *
+     * @param handler is the callback handler function being unregistered
+     *
+     */
+    public fun unregisterCallback(handler: (evt: BluenoxEvents, String, String) -> Unit): Boolean {
+        return callbackList.remove(handler)
+    }
+
+
+    @Suppress("NOTHING_TO_INLINE")
+    private inline fun getLineNum():Int
+    {
+        return Throwable().stackTrace[0].lineNumber
+
+    }
+
+
+
+    /**
+     * Validates Permissions ensuring all required permissions are enabled
+     *
+     * If this function returns false, some of the required permissions provided
+     * by requiredPermissions() was denied
+     *
+     * @return true if all required permissions are allowed, false otherwise
+     */
+    public fun validatePermissions() : Boolean
+    {
+        initPermissions()
+
+        dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_DEBUG, MODULE_TAG,
+            "Validating Permissions")
+
+        for (perm in permissionList) {
+            if (ContextCompat.checkSelfPermission(
+                    managerContext,
+                    perm) == PackageManager.PERMISSION_DENIED)
+            {
+                return false
+            }
+        }
+
+        return true
+    }
+
+    @Suppress("unused")
+    fun setDeviceClass(c: Class<*>?) {
+        this.mdeviceClass = c
+    }
+
+    /**
+     * Provides a list of Required Permissions
+     *
+     * @return string list of permissions required for the manager to operate
+     */
+    public fun requiredPermissions() : Array<String>
+    {
+        initPermissions()
+        return permissionList.toTypedArray()
+    }
+
+    /**
+     * Connects to the specified Device
+     *
+     * @param addr MAC address of the device to connect
+     * @param callback callbacks for device events
+     *
+     * @return a list of BlueNoxClassicDevice found in scan results
+     *
+     */
+    @SuppressLint("MissingPermission")
+    public fun connectByAddress(addr: String, callback: BlueNoxDeviceCallbacks): Boolean
+    {
+        if(checkRequiredPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+
+            if(mBlueNoxDeviceStore != null) {
+                var device = mBlueNoxDeviceStore!!.findDeviceByAddress(addr)
+                if(device == null) {
+                    return false
+                }
+
+                device.connect(callback)
+                //device.connect()
+
+                return true
+            }
+        }
+
+        return false
+    }
+
+
+    /**
+     * Connects to the specified Device
+     *
+     * @param addr MAC address of the device to connect
+     * @param callback callbacks for device events
+     *
+     * @return a list of BlueNoxClassicDevice found in scan results
+     *
+     */
+    @SuppressLint("MissingPermission")
+    public fun getDeviceByAddress(addr: String): BlueNoxDevice?
+    {
+        if(checkRequiredPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+
+            if(mBlueNoxDeviceStore != null) {
+                var device = mBlueNoxDeviceStore!!.findDeviceByAddress(addr)
+                if(device == null) {
+                    return null
+                }
+
+                return device
+            }
+        }
+        return null
+    }
+
+    /**
+     * Retrieves the first connected device
+     *
+     * @return an instance of BlueNoxDevice that is connected, null otherwise
+     *
+     */
+    @SuppressLint("MissingPermission")
+    public fun getConnectedDevice(): BlueNoxDevice?
+    {
+        if(checkRequiredPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+
+            if(mBlueNoxDeviceStore != null) {
+                var device = mBlueNoxDeviceStore!!.findConnectedDevice()
+
+                return device
+            }
+        }
+        return null
+    }
+
+    /**
+     * Disconnects the device
+     *
+     * @param addr the MAC address of the device
+     *
+     * @return true if disconnection initiated, false if unable to start disconnection
+     *
+     */
+    @SuppressLint("MissingPermission")
+    public fun disconnect(addr: String): Boolean
+    {
+        if(checkRequiredPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+
+            if(mBlueNoxDeviceStore != null) {
+                var device = mBlueNoxDeviceStore!!.findDeviceByAddress(addr)
+                if(device == null) {
+                    return false
+                }
+
+                device.disconnect()
+                return true
+            }
+        }
+
+        return false
+    }
+
+    /**
+     * Disconnects the device
+     *
+     * @param addr the MAC address of the device
+     *
+     * @return true if disconnection initiated, false if unable to start disconnection
+     *
+     */
+    @SuppressLint("MissingPermission")
+    public fun disconnect(dev: BlueNoxDevice): Boolean
+    {
+        if(checkRequiredPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+            dev.disconnect()
+            return true
+        }
+
+        return false
+    }
+
+    /**
+     * Disconnects the device
+     *
+     * @param addr the MAC address of the device
+     *
+     * @return true if disconnection initiated, false if unable to start disconnection
+     *
+     */
+    @SuppressLint("MissingPermission")
+    public fun disconnectAll(): Boolean
+    {
+        if(mBlueNoxDeviceStore != null) {
+
+            for (i in 0..mBlueNoxDeviceStore!!.count()) {
+                var device = mBlueNoxDeviceStore!!.getDeviceFromIndex(i)
+                if(device != null) {
+                    device.disconnect()
+                }
+            }
+
+            return true
+        }
+
+        return false
+    }
+
+    /**
+     * Returns the Scan Results
+     *
+     * @return a list of BlueNoxClassicDevice found in scan results
+     *
+     */
+    @SuppressLint("MissingPermission")
+    public fun scanResults() : ArrayList<BlueNoxDevice>
+    {
+        val leList = ArrayList<BlueNoxDevice>()
+
+        leList.addAll(mBlueNoxDeviceStore?.deviceList!!.toList())
+
+        return leList
+    }
+
+    /**
+     * Clears currently cached scan results.
+     */
+    public fun clearScanResults()
+    {
+        mBlueNoxDeviceStore?.removeAll()
+    }
+
+    /**
+     * Retrieves a list of bonded devices
+     *
+     * @return a list of all Bonded Devices
+     */
+    @SuppressLint("MissingPermission")
+    public fun bondedDevices() : ArrayList<BlueNoxClassicDevice>
+    {
+        val bondedList = ArrayList<BlueNoxClassicDevice>()
+        val bluetoothHeadsetObject = bluetoothHeadset
+
+        for(d in bluetoothAdapter.bondedDevices)
+        {
+            var t : BluenoxDeviceType = BluenoxDeviceType.BLUENOX_TYPE_UNKNOWN
+
+            if(d != null) {
+
+                val type = d.type
+
+                when (type) {
+                    BluetoothDevice.DEVICE_TYPE_CLASSIC -> {
+                        t = BluenoxDeviceType.BLUENOX_TYPE_BT_CLASSIC
+                    }
+                    BluetoothDevice.DEVICE_TYPE_LE -> {
+                        t = BluenoxDeviceType.BLUENOX_TYPE_BT_LE
+                    }
+                    BluetoothDevice.DEVICE_TYPE_DUAL -> {
+                        t = BluenoxDeviceType.BLUENOX_TYPE_BT_DUAL
+                    }
+                }
+                val audioType = getAudioType(d)
+
+                val device = BlueNoxClassicDevice(d.name, d.address, t, audioType)
+
+                if(bluetoothHeadsetObject != null) {
+
+                    val connected = bluetoothHeadsetObject.isAudioConnected(d)
+                    device.setAudioConnectionState(connected)
+                }
+
+                bondedList.add(device)
+            }
+        }
+        return bondedList
+    }
+
+    /**
+     * Provides the type of audio provided by the device
+     *
+     * @param d is the Bluetooth Device
+     *
+     * @return BlueNox Audio Type
+     */
+    @SuppressLint("MissingPermission")
+    private fun getAudioType(d: BluetoothDevice) : BluenoxAudioType
+    {
+        var audioType = BluenoxAudioType.BLUENOX_AUDIO_UNKNOWN
+
+        val bluetoothHeadsetObject = bluetoothHeadset
+        val bluetoothA2dpObject = bluetoothA2dp
+
+        val headsetDevices = bluetoothHeadsetObject?.getDevicesMatchingConnectionStates(intArrayOf(BluetoothProfile.STATE_CONNECTED,
+            BluetoothProfile.STATE_CONNECTING,
+            BluetoothProfile.STATE_DISCONNECTED,
+            BluetoothProfile.STATE_DISCONNECTING))
+
+        if(headsetDevices != null && headsetDevices.size > 0) {
+            if (headsetDevices.contains(d)) {
+                audioType = BluenoxAudioType.BLUENOX_AUDIO_HEADSET
+            }
+        }
+
+        if(audioType == BluenoxAudioType.BLUENOX_AUDIO_UNKNOWN)
+        {
+            val a2dpDevices = bluetoothA2dpObject?.getDevicesMatchingConnectionStates(intArrayOf(BluetoothProfile.STATE_CONNECTED,
+                BluetoothProfile.STATE_CONNECTING,
+                BluetoothProfile.STATE_DISCONNECTED,
+                BluetoothProfile.STATE_DISCONNECTING))
+
+            if(a2dpDevices != null && a2dpDevices.size > 0) {
+                if (a2dpDevices.contains(d)) {
+                    audioType = BluenoxAudioType.BLUENOX_AUDIO_A2DP
+                }
+            }
+        }
+
+        return audioType
+    }
+
+    private fun initPermissions()
+    {
+        if(!permissionsInit) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                /* API below 31  */
+                permissionList.add(Manifest.permission.BLUETOOTH)
+                permissionList.add(Manifest.permission.BLUETOOTH_ADMIN)
+                permissionList.add(Manifest.permission.ACCESS_FINE_LOCATION)
+                permissionList.add(Manifest.permission.ACCESS_COARSE_LOCATION)
+                permissionsInit = true
+            } else {
+                /* API above 31  */
+                permissionList.add(Manifest.permission.BLUETOOTH_SCAN)
+                permissionList.add(Manifest.permission.BLUETOOTH_CONNECT)
+                permissionList.add(Manifest.permission.BLUETOOTH_ADVERTISE)
+                permissionList.add(Manifest.permission.ACCESS_FINE_LOCATION)
+                permissionList.add(Manifest.permission.ACCESS_COARSE_LOCATION)
+                permissionsInit = true
+            }
+        }
+    }
+
+    private fun handleTimerTickFunction()
+    {
+        /* Check to see if any devices are connecting */
+        for(d in classicDeviceList)
+        {
+            if(d.state == BluenoxDeviceState.BLUENOX_DEVICE_STATE_CONNECTING)
+            {
+                val dur = Duration.between(d.connectionStartTimestamp, Instant.now())
+                if( dur.seconds >= 7)
+                {
+
+                    d.state = BluenoxDeviceState.BLUENOX_DEVICE_STATE_DISCONNECTED
+
+                    var name = ""
+                    var addr = ""
+                    /* Device Connection Failed */
+                    if(d.name != null) {
+                        name = d.name!!
+                    }
+
+                    if(d.addr != null) {
+                        addr = d.addr!!
+                    }
+
+                    queueEvent(BluenoxEvents.BLUENOX_EVT_DEVICE_CONNECTION_FAILED, name, addr)
+                }
+            }
+        }
+    }
+
+    public fun setDebugLevel(lvl: DebugLevels) {
+        dbgObj.setDebugLevel(lvl)
+    }
+
+    private fun initThread()
+    {
+        threadTimer = object: CountDownTimer(30000, 1000) {
+            override fun onTick(millisUntilFinished: Long) {
+                queueEventId(BluenoxThreadEvents.BLUENOX_THREAD_EVT_TIMER_TICK)
+            }
+
+            override fun onFinish() {
+                queueEventId(BluenoxThreadEvents.BLUENOX_THREAD_EVT_TIMER_FINISH)
+            }
+        }
+
+        discoveryTimer = object: CountDownTimer(7000, 1000) {
+            override fun onTick(millisUntilFinished: Long) {
+            }
+
+            override fun onFinish() {
+                queueEventId(BluenoxThreadEvents.BLUENOX_THREAD_EVT_DISCOVERY_TIMER_DONE)
+            }
+        }
+
+        thread {
+            try {
+
+                threadTimer.start()
+
+                while (runThread) {
+                    //consume(queue.take());
+
+                    val evt: BluenoxEventInfo? = bluenoxThreadQueue.take()
+
+                    if (evt != null) {
+
+                        dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_INFO, MODULE_TAG,
+                            "Thread Event ${evt.id} ${evt.name}")
+
+                        when(evt.id)
+                        {
+                            BluenoxThreadEvents.BLUENOX_THREAD_EVT_TIMER_TICK -> {
+                                handleTimerTickFunction();
+                            }
+                            BluenoxThreadEvents.BLUENOX_THREAD_EVT_TIMER_FINISH ->{
+
+                            }
+                            BluenoxThreadEvents.BLUENOX_THREAD_EVT_EVT -> {
+
+                                /* Send event */
+                                for(c in callbackList)
+                                {
+                                    c.invoke(evt.evt, evt.name, evt.addr)
+                                }
+                            }
+
+                            BluenoxThreadEvents.BLUENOX_THREAD_EVT_DISCOVERY_TIMER_DONE -> {
+                                /* Send event */
+                                for(c in callbackList)
+                                {
+                                    c.invoke(BluenoxEvents.BLUENOX_EVT_DISCOVERY_COMPLETE, "", "")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (ex: InterruptedException )
+            {
+                dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_ERROR, MODULE_TAG,
+                    "Interrupted exception $ex")
+
+            }
+        }
+    }
+
+    /**
+     * Initializes the BlueNox Classic Manager
+     *
+     * This functions must be called once before other APIs are accessed except
+     *
+     * @param context is the application context
+     *
+     * @return true if successful, false if not. In case of failure, the
+     *         initialization should be called
+     *
+     */
+    fun initialize(context: Context) : Boolean {
+
+        managerContext = context.applicationContext
+        runThread = true
+
+        initPermissions()
+
+        val permissionsReady = validatePermissions()
+        if(!permissionsReady) {
+            return false
+        }
+
+        bluetoothManager = context.getSystemService(BluetoothManager::class.java)
+        bluetoothAdapter = bluetoothManager.adapter
+        bluetoothLeScanner = bluetoothAdapter.bluetoothLeScanner
+        mBlueNoxDeviceStore = BlueNoxDeviceStore()
+        bluenoxThreadQueue.clear()
+
+        initThread()
+
+        // Register the Broadcast Receiver to receive information
+        val filter = IntentFilter();
+
+        //filter.addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+        //filter.addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
+        //filter.addAction(BluetoothDevice.ACTION_ACL_DISCONNECT_REQUESTED)
+
+//
+//        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+//            filter.addAction(BluetoothDevice.ACTION_ALIAS_CHANGED)
+//        }
+
+        filter.addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+        filter.addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
+
+//        filter.addAction(BluetoothDevice.ACTION_CLASS_CHANGED)
+//        filter.addAction(BluetoothDevice.ACTION_FOUND)
+//        filter.addAction(BluetoothDevice.ACTION_NAME_CHANGED)
+//        filter.addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
+//        filter.addAction(BluetoothDevice.ACTION_UUID)
+
+        registerReceiver(context, BlueNoxDeviceReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
+        receiverRegistered = true
+
+        initComplete = true
+        return true;
+    }
+
+
+    fun isInitialized(): Boolean
+    {
+        return initComplete
+    }
+
+    private fun isBluetoothEnabled(): Boolean
+    {
+        try {
+            if (bluetoothAdapter.isEnabled) {
+
+                dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_INFO, MODULE_TAG,
+                    "Bluetooth is Enabled")
+            } else {
+                dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_INFO, MODULE_TAG,
+                    "Bluetooth is Disabled")
+            }
+            return bluetoothAdapter.isEnabled
+
+        } catch (e: NullPointerException) {
+
+            dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_INFO, MODULE_TAG,
+                "Exception: Null Pointer")
+        }
+
+        return false
+    }
+
+    /* Stops current scanning */
+    private fun stopScanningInternal()
+    {
+        dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_INFO, MODULE_TAG,
+            "Stopping Scanning Internal")
+
+        /* Ensure Adapter is still On, otherwise we shouldn't stop */
+        if (isBluetoothEnabled() && isScanning) {
+
+            when {
+                ContextCompat.checkSelfPermission(
+                    managerContext, Manifest.permission.BLUETOOTH_SCAN
+                ) == PackageManager.PERMISSION_GRANTED -> {
+                    bluetoothLeScanner.stopScan(leScanCallback)
+                    isScanning = false
+                }
+            }
+        }
+    }
+
+    fun stopScanning()
+    {
+        stopScanningInternal()
+
+        if (!isScanning)
+            queueEvent(BluenoxEvents.BLUENOX_EVT_SCAN_STOP, "", "")
+    }
+
+    fun scanSetLegacy(legacy: Boolean) {
+        useLegacyScanning = legacy
+    }
+
+    fun getActiveDevice() : BlueNoxDevice?
+    {
+        return mActiveDevice
+    }
+
+    fun setActiveDevice(d: BlueNoxDevice )
+    {
+        mActiveDevice = d
+    }
+
+
+    /**
+     * \brief Finds a device with the specified address
+     *
+     * @details Begins a scan that will collect scan results and find the device with the
+     * specified address
+     *
+     * @param addr is the address of the device to scan for
+     * @param timeout is the number of seconds to scan
+     *
+     */
+    @Suppress("unused")
+    fun scanWithAddress(addr: String?, timeout: Long) {
+        clearCustomScanFilters()
+        var settings: ScanSettings? = null
+        val filters: MutableList<ScanFilter> = ArrayList()
+
+        filters.add(ScanFilter.Builder().setDeviceAddress(addr).build())
+
+        try {
+            settings =
+                ScanSettings.Builder()
+                    .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                    .setLegacy(useLegacyScanning)
+                    .setPhy(BluetoothDevice.PHY_LE_1M)
+                    .build()
+        } catch (e: NullPointerException) {
+
+            dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_ERROR, MODULE_TAG,
+                "Null Pointer Error  $e")
+        }
+
+        startScanning(timeout, filters, settings)
+    }
+
+    /**
+    * \brief Finds a device with the specified address
+    *
+    * @details Begins a scan that will collect scan results and find the device with the
+    * specified address
+    *
+    * @param addr is the address of the device to scan for
+    * @param timeout is the number of seconds to scan
+    *
+    */
+    @Suppress("unused")
+    fun scanWithUUID(uuid: ParcelUuid, timeout: Long): Boolean {
+        clearCustomScanFilters()
+        var settings: ScanSettings? = null
+        val filters: MutableList<ScanFilter> = ArrayList()
+
+        filters.add(ScanFilter.Builder().setServiceUuid(uuid).build())
+
+        try {
+            settings =
+                ScanSettings.Builder()
+                    .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                    .setLegacy(useLegacyScanning)
+                    .setPhy(BluetoothDevice.PHY_LE_1M)
+                    .build()
+        } catch (e: NullPointerException) {
+
+            dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_ERROR, MODULE_TAG,
+                "Null Pointer Error  $e")
+        }
+
+        return startScanning(timeout, filters, settings)
+    }
+
+    /**
+     * \brief Finds all LE devices
+     *
+     * @details Begins a scan that will collect scan results and find the device with the
+     * specified address
+     *
+     * @param addr is the address of the device to scan for
+     * @param timeout is the number of seconds to scan
+     *
+     * @return true if scan started, false otherwise
+     */
+    @Suppress("unused")
+    public fun scanForDevices(timeout: Long): Boolean {
+        clearCustomScanFilters()
+        return scanForDevicesInternal(timeout)
+    }
+
+    private fun scanForDevicesInternal(timeout: Long): Boolean {
+        var settings: ScanSettings? = null
+        val filters: MutableList<ScanFilter> = ArrayList()
+
+        try {
+            settings =
+                ScanSettings.Builder()
+                    .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
+                    .setLegacy(useLegacyScanning)
+                    .setPhy(BluetoothDevice.PHY_LE_1M)
+                    .build()
+        } catch (e: NullPointerException) {
+
+            dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_ERROR, MODULE_TAG,
+                "Null Pointer Error  $e")
+        }
+
+        return startScanning(timeout, filters, settings)
+    }
+
+    /**
+     * Starts a scan and only emits devices advertising the given manufacturer/company ID.
+     */
+    fun scanWithManufacturerId(manufacturerId: Int, timeout: Long): Boolean {
+        clearCustomScanFilters()
+        scanManufacturerIdFilter = manufacturerId
+        return scanForDevicesInternal(timeout)
+    }
+
+    /**
+     * Starts a scan and only emits devices containing the given advertising data type.
+     *
+     * The data type should be an AD type value from the BLE advertising specification
+     * (for example, 0x09 for complete local name).
+     */
+    fun scanWithAdvertisingDataType(adType: Int, timeout: Long): Boolean {
+        clearCustomScanFilters()
+        scanAdvertisingDataTypeFilter = adType and 0xFF
+        return scanForDevicesInternal(timeout)
+    }
+
+    private fun clearCustomScanFilters() {
+        scanManufacturerIdFilter = null
+        scanAdvertisingDataTypeFilter = null
+    }
+
+    private fun shouldEmitScanResult(result: ScanResult): Boolean {
+        val manufacturerFilter = scanManufacturerIdFilter
+        if (manufacturerFilter != null) {
+            val record = result.scanRecord ?: return false
+            val manufacturers = record.manufacturerSpecificData
+            if (manufacturers == null || manufacturers.indexOfKey(manufacturerFilter) < 0) {
+                return false
+            }
+        }
+
+        val adTypeFilter = scanAdvertisingDataTypeFilter
+        if (adTypeFilter != null) {
+            val payload = result.scanRecord?.bytes ?: return false
+            if (!containsAdvertisingDataType(payload, adTypeFilter)) {
+                return false
+            }
+        }
+
+        return true
+    }
+
+    private fun containsAdvertisingDataType(payload: ByteArray, adType: Int): Boolean {
+        var index = 0
+        while (index < payload.size) {
+            val length = payload[index].toInt() and 0xFF
+            if (length == 0) {
+                return false
+            }
+            val typeIndex = index + 1
+            if (typeIndex < payload.size) {
+                val currentType = payload[typeIndex].toInt() and 0xFF
+                if (currentType == adType) {
+                    return true
+                }
+            }
+            index += (length + 1)
+        }
+        return false
+    }
+
+    /* before any action check if BT is turned ON and enabled for us
+     * call this in onResume to be always sure that BT is ON when Your
+     * application is put into the foreground */
+    private fun isBtEnabled(): Boolean {
+        return bluetoothAdapter.isEnabled
+    }
+    /**
+     * Initiates Scanning for Bluetooth LE Devices
+     *
+     * Scanning is asynchronous and will generate the BLUENOX_EVT_DISCOVERY_COMPLETE
+     * event once complete.
+     *
+     */
+    @Suppress("unused")
+    private fun startScanning(
+        scanTimeoutMs: Long,
+        filters: List<ScanFilter>?,
+        settings: ScanSettings?
+    ): Boolean {
+
+        var curSettings = settings;
+
+        /* Guard against scanning if not enabled */
+        if (!isBtEnabled()) {
+            return false
+        }
+
+        if (filters != null) mCurFilters = filters
+        if (settings != null) mCurSettings = settings
+
+        SCAN_PERIOD = scanTimeoutMs
+
+        dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_DEBUG, MODULE_TAG,
+            "Starting Scanning")
+
+        if (SCAN_PERIOD > 0) {
+            Handler(Looper.getMainLooper()).postDelayed({
+
+                dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_DEBUG, MODULE_TAG,
+                    "Scan Period Ended")
+
+                /* Guard against scan being disabled */
+                if (isScanning) {
+                    stopScanningInternal()
+                    isScanning = false
+
+                    /* Send event indicating scan has stopped */
+                    queueEvent(BluenoxEvents.BLUENOX_EVT_SCAN_STOP, "", "")
+                }
+            }, SCAN_PERIOD)
+        }
+
+        if (curSettings == null) {
+
+            curSettings = ScanSettings.Builder() //
+                //.setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES) //
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY) //
+                .build()
+        }
+
+        isScanning = true
+
+        when {
+            ContextCompat.checkSelfPermission(
+                managerContext, Manifest.permission.BLUETOOTH_SCAN
+            ) == PackageManager.PERMISSION_GRANTED -> {
+                bluetoothLeScanner.startScan(filters, curSettings, leScanCallback)
+            }
+        }
+
+
+
+        return true
+    }
+
+    @Suppress("unused")
+    fun getConnectionState(d: BlueNoxDevice): Int {
+        if (d == null) return 0
+
+        if(checkRequiredPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+            return bluetoothManager.getConnectionState(d.device, BluetoothProfile.GATT)
+        }
+
+        return -1
+    }
+
+    @Suppress("unused")
+    fun isDeviceConnected(d: BlueNoxDevice): Boolean {
+        if (d == null) return false
+
+        if(checkRequiredPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+            val state = bluetoothManager.getConnectionState(d.device, BluetoothProfile.GATT)
+            return state == BluetoothProfile.STATE_CONNECTED
+        }
+
+        return false
+    }
+
+    @Suppress("unused")
+    fun isDeviceConnectedOrAttempting(d: BlueNoxDevice): Boolean {
+        if (d == null) return false
+
+        if(checkRequiredPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+            val state = bluetoothManager.getConnectionState(d.device, BluetoothProfile.GATT)
+            return state == BluetoothProfile.STATE_CONNECTED || state == BluetoothProfile.STATE_CONNECTING
+        }
+
+        return false
+    }
+
+    @Suppress("unused")
+    fun isDeviceDisconnected(d: BlueNoxDevice): Boolean {
+        if (d == null) return false
+
+        if(checkRequiredPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+            val state = bluetoothManager.getConnectionState(d.device, BluetoothProfile.GATT)
+            return state == BluetoothProfile.STATE_DISCONNECTED
+        }
+
+        return false
+    }
+
+    public fun checkRequiredPermission(perm: String) : Boolean
+    {
+        val permissionToCheck = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            when (perm) {
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.BLUETOOTH_ADVERTISE -> Manifest.permission.BLUETOOTH
+                else -> perm
+            }
+        } else {
+            perm
+        }
+        when {
+            ContextCompat.checkSelfPermission(
+                managerContext, permissionToCheck
+            ) == PackageManager.PERMISSION_GRANTED -> {
+                return true
+            }
+        }
+        return false
+    }
+
+    private val leScanCallback: ScanCallback = object : ScanCallback() {
+        override fun onScanResult(callbackType: Int, result: ScanResult) {
+            super.onScanResult(callbackType, result)
+
+            if (!shouldEmitScanResult(result)) {
+                return
+            }
+
+            /* Add device to Device Store */
+            if(mBlueNoxDeviceStore != null)
+            {
+                mBlueNoxDeviceStore!!.addDevice(result.device,
+                                                mdeviceClass,
+                                                result.rssi,
+                                                result.scanRecord)
+
+                dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_INFO, MODULE_TAG,
+                    "Device Found:    " + result.device.address)
+
+                val d = mBlueNoxDeviceStore!!.getDeviceFromAddress(result.device.address)
+                if(d != null) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        d.primaryPhy = result.primaryPhy
+                        d.secondaryPhy = result.secondaryPhy
+                    } else {
+                        d.primaryPhy = 0
+                        d.secondaryPhy = 0
+                    }
+                    /* Send event indicating scan has stopped */
+                    queueEvent(BluenoxEvents.BLUENOX_EVT_DEVICE_FOUND, d.getName(), d.getMacAddress())
+                }
+            }
+        }
+    }
+
+    private fun processDeviceRssi(device: BluetoothDevice, rssi: Int) {
+        if (mProximityEngine != null && mProximityEngine.running()) mProximityEngine.updateRSSI(device, rssi)
+    }
+
+    // Create a BroadcastReceiver for Bluetooth Classic and other Actions
+    /**
+     * BroadcastReceiver for Bluetooth Classic and other Actions
+     *
+     */
+    @SuppressLint("MissingPermission")
+    private val BlueNoxDeviceReceiver = object : BroadcastReceiver() {
+
+        override fun onReceive(context: Context, intent: Intent) {
+            val action: String = intent.action.toString()
+            val device : BluetoothDevice? =
+                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+
+            if(device == null)
+            {
+                dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_DEBUG, MODULE_TAG,
+                    "device null")
+
+
+
+                return
+            }
+
+            dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_DEBUG, MODULE_TAG,
+                "BluenoxDeviceReceiver $action")
+
+
+            when (action)
+            {
+                BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
+
+                    dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_DEBUG, MODULE_TAG,
+                        "Bond State Changed Event")
+
+                    val deviceBondStateChanged: BluetoothDevice?
+
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                        /* API below 31  */
+                        deviceBondStateChanged =
+                            intent.getParcelableExtra<BluetoothDevice?>(BluetoothDevice.EXTRA_DEVICE)
+                    }
+                    else
+                    {
+                        deviceBondStateChanged = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                    }
+
+                    if (deviceBondStateChanged != null) {
+                        val bondState =
+                            intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, -1);
+                        val previousBondState =
+                            intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, -1);
+
+                        if (bondState == BluetoothDevice.BOND_BONDING) {
+                            dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_DEBUG, MODULE_TAG, "Device still bonding: " + deviceBondStateChanged.name)
+                        } else if (bondState == BluetoothDevice.BOND_BONDED) {
+                            dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_DEBUG, MODULE_TAG, "Device Bonded: " + deviceBondStateChanged.name)
+
+                            //queueEvent(BluenoxEvents.BLUENOX_EVT_DEVICE_BONDED, deviceBondStateChanged.name, deviceBondStateChanged.address)
+                        }
+                        val d = mBlueNoxDeviceStore?.getDeviceFromAddress(deviceBondStateChanged.address)
+                        d?.handleBondStateChanged(bondState, previousBondState)
+                    }
+                }
+                BluetoothDevice.ACTION_PAIRING_REQUEST -> {
+                    val pairingDevice = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra<BluetoothDevice?>(BluetoothDevice.EXTRA_DEVICE)
+                    } else {
+                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                    } ?: return
+                    val d = mBlueNoxDeviceStore?.getDeviceFromAddress(pairingDevice.address) ?: return
+                    d.getMainCallback().uiBondStateEvent(
+                        d,
+                        BlueNoxDeviceCallbacks.BlueNoxBondState.PIN_REQUESTED,
+                        "Pairing PIN requested by remote device",
+                    )
+                    val pin = d.provideBondPin() ?: return
+                    runCatching {
+                        pairingDevice.setPin(pin.toByteArray())
+                        pairingDevice.setPairingConfirmation(true)
+                    }.onFailure { ex ->
+                        d.getMainCallback().uiOperationFailure(
+                            pairingDevice,
+                            BlueNoxDeviceCallbacks.BlueNoxFailureReason.BOND_FAILED,
+                            "Failed to provide pairing PIN: ${ex.message ?: ex.javaClass.simpleName}",
+                            null,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+//    fun connectByAddress(addr: String)
+//    {
+//        if (callback != null) {
+//            addListener(callback)
+//        }
+//
+//        if (mbleConnCallback == null) {
+//            Log.d(MODULE_TAG, "Setting new mbleConnCallback")
+//            mbleConnCallback = BluenoxGATTCallback(mMainCallback, "connectionCallback")
+//        }
+//
+//        mCurrentlyConnecting = true
+//
+//        if(BluenoxLEManager.getInstance().checkRequiredPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+//            device!!.connectGatt(mParent, false, mbleConnCallback)
+//        }
+//
+//        enableReconnection()
+//        resetConnectionTimeoutCount(4000)
+//
+//        BluenoxLEManager.getInstance().setActiveDevice(this)
+//
+//        //startConnectionTimer();
+//    }
+
+
+    /**
+     * Uninitializes the BlueNox Classic Manager
+     *
+     * This functions must be called once the application is being killed and the manager
+     * is no longer needed
+     *
+     */
+    fun uninitialize()
+    {
+        stopScanningInternal()
+        runCatching { threadTimer.cancel() }
+        runCatching { discoveryTimer.cancel() }
+        if (receiverRegistered) {
+            runCatching { managerContext.unregisterReceiver(BlueNoxDeviceReceiver) }
+            receiverRegistered = false
+        }
+        runThread = false
+        queueEventId(BluenoxThreadEvents.BLUENOX_THREAD_EVT_TIMER_FINISH)
+        initComplete = false
+    }
+
+
+    private class BluenoxEventInfo(
+        val id: BluenoxThreadEvents,
+        val evt: BluenoxEvents,
+        val name: String,
+        val addr: String
+    )
+    {
+
+    }
+
+    private fun queueEventId(id: BluenoxThreadEvents)
+    {
+        val event = BluenoxEventInfo(id,
+            BluenoxEvents.BLUENOX_EVT_INIT_COMPLETE,
+            "",
+            "")
+        var queued = bluenoxThreadQueue.offer(event)
+        if (!queued) {
+            // Drop oldest item when queue is saturated to avoid crashing on scan bursts.
+            bluenoxThreadQueue.poll()
+            queued = bluenoxThreadQueue.offer(event)
+        }
+
+        if(!queued)
+        {
+            dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_ERROR, MODULE_TAG,
+                "Unable to Queue Event Init Complete")
+        }
+    }
+
+    private fun queueEvent(evt: BluenoxEvents, name: String, addr: String)
+    {
+        val event = BluenoxEventInfo(BluenoxThreadEvents.BLUENOX_THREAD_EVT_EVT, evt, name, addr)
+        var queued = bluenoxThreadQueue.offer(event)
+        if (!queued) {
+            // Drop oldest item when queue is saturated to avoid crashing on scan bursts.
+            bluenoxThreadQueue.poll()
+            queued = bluenoxThreadQueue.offer(event)
+        }
+
+        if(!queued)
+        {
+            dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_ERROR, MODULE_TAG,
+                "Unable to Queue Event" + evt.name)
+        }
+    }
+
+    /**
+     * Enables or disables tracing capabilities for debug
+     *
+     */
+    public fun setTracing(enabled: Boolean)
+    {
+        debugLog.setTracing(enabled)
+    }
+
+    /**
+     * Retrieves tracing data
+     *
+     */
+    public fun getTracingData():ByteArray
+    {
+        return debugLog.getBytes()
+    }
+
+    /**
+    * \brief Check whether this hardware supports BLE
+    *
+    * BLE Manager is a singleton class which means only one is instantiated per application
+    *
+     * @param ctx is the current context
+    *
+    * @return true if BLE available, false otherwise
+    */
+    public fun checkHardwareCompatible(ctx: Context): Boolean {
+
+        /* Check general Bluetooth LE Service availability */
+        return ctx.packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)
+    }
+
+    companion object {
+
+        @SuppressLint("StaticFieldLeak")
+        @Volatile
+        private var instance: BluenoxLEManager? = null
+
+        private const val version = "0.1.003"
+
+        private val permissionList = ArrayList<String>();
+        private var permissionsInit = false
+
+        @SuppressLint("StaticFieldLeak")
+        private lateinit var managerContext : Context
+
+        private const val MODULE_TAG : String = "BLNXBTMGR"
+
+        val callbackList = arrayListOf<(BluenoxEvents, String, String) -> Unit>()
+
+        private var bluetoothHeadset: BluetoothHeadset? = null
+        private var bluetoothA2dp: BluetoothA2dp? = null
+
+        private lateinit var bluetoothManager: BluetoothManager
+        private lateinit var bluetoothAdapter: BluetoothAdapter
+        private lateinit var bluetoothLeScanner: BluetoothLeScanner
+
+
+        var initComplete = false
+        private val classicDeviceList = ArrayList<BlueNoxClassicDeviceInternal>()
+        private val classicDeviceFoundList = ArrayList<BlueNoxClassicDeviceInternal>()
+
+        private val debugLog = BluenoxDebugLog()
+
+        private lateinit var threadTimer : CountDownTimer
+        private lateinit var discoveryTimer : CountDownTimer
+
+
+        private var runThread = true
+        private var receiverRegistered = false
+
+        private val bluenoxThreadQueue: ArrayBlockingQueue<BluenoxEventInfo> = ArrayBlockingQueue(10, true)
+
+        fun getInstance() =
+            instance ?: synchronized(this) {
+                instance ?: BluenoxLEManager().also { instance = it }
+            }
+    }
+}
