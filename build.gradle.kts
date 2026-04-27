@@ -78,12 +78,19 @@ publishing {
     repositories {
         maven {
             name = "mavenCentral"
-            val releasesRepoUrl = uri("https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/")
-            val snapshotsRepoUrl = uri("https://s01.oss.sonatype.org/content/repositories/snapshots/")
+            // Sonatype Central Portal OSSRH-compatible endpoints.
+            val releasesRepoUrl = uri("https://ossrh-staging-api.central.sonatype.com/service/local/staging/deploy/maven2/")
+            val snapshotsRepoUrl = uri("https://central.sonatype.com/repository/maven-snapshots/")
             url = if (version.toString().endsWith("SNAPSHOT")) snapshotsRepoUrl else releasesRepoUrl
             credentials {
-                username = (findProperty("ossrhUsername") as String?) ?: System.getenv("OSSRH_USERNAME")
-                password = (findProperty("ossrhPassword") as String?) ?: System.getenv("OSSRH_PASSWORD")
+                username = (findProperty("centralPortalUsername") as String?)
+                    ?: System.getenv("CENTRAL_PORTAL_USERNAME")
+                    ?: (findProperty("ossrhUsername") as String?)
+                    ?: System.getenv("OSSRH_USERNAME")
+                password = (findProperty("centralPortalPassword") as String?)
+                    ?: System.getenv("CENTRAL_PORTAL_PASSWORD")
+                    ?: (findProperty("ossrhPassword") as String?)
+                    ?: System.getenv("OSSRH_PASSWORD")
             }
         }
         mavenLocal()
