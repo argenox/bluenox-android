@@ -1,0 +1,21 @@
+# Module-local Gradle output
+/.gradle/
+/build/
+
+# Android/NDK intermediates
+/.cxx/
+/.externalNativeBuild/
+
+# IDE
+*.iml
+.idea/
+
+# Local machine config
+local.properties
+
+# Kotlin
+.kotlin/
+
+# OS junk
+.DS_Store
+Thumbs.db

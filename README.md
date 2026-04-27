@@ -5,6 +5,8 @@
 [![Language](https://img.shields.io/badge/language-Kotlin-orange.svg)](https://kotlinlang.org/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-lightgrey.svg)](LICENSE)
 
+![BlueNox Library Banner](assets/bluenox-lib.png)
+
 BlueNox is a Kotlin-first Android BLE library focused on reliable scan/connect/GATT operations with structured failure handling, callback and Flow APIs, and optional beacon/DFU-oriented workflows.
 
 ## Table of contents
