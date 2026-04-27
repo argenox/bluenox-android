@@ -109,6 +109,36 @@ class BluenoxGATTCallback internal constructor(cb: BlueNoxDeviceCallbacks, name:
             .sendToTarget()
     }
 
+    @Suppress("DEPRECATION")
+    override fun onDescriptorRead(
+        gatt: BluetoothGatt,
+        descriptor: BluetoothGattDescriptor,
+        status: Int
+    ) {
+        super.onDescriptorRead(gatt, descriptor, status)
+        val data: BluetoothData = BluetoothData()
+        data.gatt = gatt
+        data.d = descriptor
+        data.status = status
+        data.value = descriptor.value ?: byteArrayOf()
+        bleHandler.obtainMessage(MSG_DESCRIPTOR_READ, data).sendToTarget()
+    }
+
+    override fun onDescriptorRead(
+        gatt: BluetoothGatt,
+        descriptor: BluetoothGattDescriptor,
+        status: Int,
+        value: ByteArray
+    ) {
+        super.onDescriptorRead(gatt, descriptor, status, value)
+        val data: BluetoothData = BluetoothData()
+        data.gatt = gatt
+        data.d = descriptor
+        data.status = status
+        data.value = value
+        bleHandler.obtainMessage(MSG_DESCRIPTOR_READ, data).sendToTarget()
+    }
+
     override fun onMtuChanged(gatt: BluetoothGatt?, mtu: Int, status: Int) {
         super.onMtuChanged(gatt, mtu, status)
 
@@ -250,6 +280,10 @@ class BluenoxGATTCallback internal constructor(cb: BlueNoxDeviceCallbacks, name:
                 //Log.d(MODULE_TAG, "MSG_DESCRIPTOR_WRITTEN: " + data.d.getUuid());
                 mCallbacks.uiDescriptorWritten(data.gatt, data.d, data.status)
             }
+            MSG_DESCRIPTOR_READ -> {
+                data = msg.obj as BluetoothData
+                mCallbacks.uiDescriptorRead(data.gatt, data.d, data.status, data.value)
+            }
 
             MSG_MTU_UPDATE -> {
                 data = msg.obj as BluetoothData
@@ -315,8 +349,9 @@ class BluenoxGATTCallback internal constructor(cb: BlueNoxDeviceCallbacks, name:
         private const val MSG_DEVICE_RSSI = 17
         private const val MSG_CHAR_READ = 18
         private const val MSG_DESCRIPTOR_WRITTEN = 19
-        private const val MSG_MTU_UPDATE = 20
-        private const val MSG_CONNECTION_UPDATED = 21
-        private const val MSG_SERVICES_CHANGED = 22
+        private const val MSG_DESCRIPTOR_READ = 20
+        private const val MSG_MTU_UPDATE = 21
+        private const val MSG_CONNECTION_UPDATED = 22
+        private const val MSG_SERVICES_CHANGED = 23
     }
 }

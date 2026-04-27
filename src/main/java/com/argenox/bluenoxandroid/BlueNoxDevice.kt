@@ -103,6 +103,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
     private var bondInProgress = false
     private var bondRetryCount = 0
     private var bondPinProvider: (() -> String?)? = null
+    private var longWriteStrategy: BlueNoxLongWriteStrategy = BlueNoxLongWriteStrategy.Default
     private data class PendingCccdRequest(
         val characteristicUuid: String,
         val enabled: Boolean,
@@ -206,6 +207,14 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
 
     fun setBondPinProvider(provider: (() -> String?)?) {
         bondPinProvider = provider
+    }
+
+    fun setLongWriteStrategy(strategy: BlueNoxLongWriteStrategy) {
+        longWriteStrategy = strategy
+    }
+
+    fun getLongWriteStrategy(): BlueNoxLongWriteStrategy {
+        return longWriteStrategy
     }
 
     internal fun provideBondPin(): String? {
@@ -792,6 +801,180 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             return operationFailure(operation = "refresh-gatt-cache", detail = detail)
         }
         return operationSuccess(operation = "refresh-gatt-cache", detail = "Refresh cache requested")
+    }
+
+    fun readRssi(): Boolean = readRssiResult().success
+
+    fun readRssiResult(): BlueNoxGattOperationResult {
+        val gatt = getConnectedGattOrReport("readRssi")
+            ?: return operationFailure(operation = "read-rssi", detail = "GATT is not connected")
+        val started = gatt.readRemoteRssi()
+        if (!started) {
+            val detail = "readRemoteRssi returned false"
+            reportOperationFailure(
+                reason = BlueNoxDeviceCallbacks.BlueNoxFailureReason.OPERATION_START_FAILED,
+                detail = detail,
+                characteristicUuid = null,
+            )
+            return operationFailure(operation = "read-rssi", detail = detail)
+        }
+        return operationSuccess(operation = "read-rssi", detail = "RSSI read requested")
+    }
+
+    private fun parseUuidOrFail(uuid: String, label: String): UUID? {
+        return runCatching { UUID.fromString(uuid) }.getOrElse {
+            reportOperationFailure(
+                reason = BlueNoxDeviceCallbacks.BlueNoxFailureReason.INVALID_ARGUMENT,
+                detail = "Invalid $label UUID: $uuid",
+                characteristicUuid = uuid,
+            )
+            return null
+        }
+    }
+
+    private fun getDescriptor(
+        serviceUuid: UUID,
+        characteristicUuid: UUID,
+        descriptorUuid: UUID,
+    ): BluetoothGattDescriptor? {
+        val services = mServices ?: return null
+        val service = services.firstOrNull { it.uuid == serviceUuid } ?: return null
+        val characteristic = service.characteristics.firstOrNull { it.uuid == characteristicUuid } ?: return null
+        return characteristic.getDescriptor(descriptorUuid)
+    }
+
+    fun readDescriptorByUuid(
+        serviceUuid: String,
+        characteristicUuid: String,
+        descriptorUuid: String,
+    ): Boolean {
+        return readDescriptorByUuidResult(serviceUuid, characteristicUuid, descriptorUuid).success
+    }
+
+    @Suppress("DEPRECATION")
+    fun readDescriptorByUuidResult(
+        serviceUuid: String,
+        characteristicUuid: String,
+        descriptorUuid: String,
+    ): BlueNoxGattOperationResult {
+        val serviceId = parseUuidOrFail(serviceUuid, "service")
+            ?: return operationFailure(operation = "read-descriptor", detail = "Invalid service UUID", characteristicUuid = characteristicUuid)
+        val characteristicId = parseUuidOrFail(characteristicUuid, "characteristic")
+            ?: return operationFailure(operation = "read-descriptor", detail = "Invalid characteristic UUID", characteristicUuid = characteristicUuid)
+        val descriptorId = parseUuidOrFail(descriptorUuid, "descriptor")
+            ?: return operationFailure(operation = "read-descriptor", detail = "Invalid descriptor UUID", characteristicUuid = characteristicUuid)
+        val gatt = getConnectedGattOrReport("readDescriptorByUuid")
+            ?: return operationFailure(operation = "read-descriptor", detail = "GATT is not connected", characteristicUuid = characteristicUuid)
+        val descriptor = getDescriptor(serviceId, characteristicId, descriptorId)
+        if (descriptor == null) {
+            val detail = "Descriptor not found: $descriptorId on characteristic $characteristicId"
+            reportOperationFailure(
+                reason = BlueNoxDeviceCallbacks.BlueNoxFailureReason.OPERATION_START_FAILED,
+                detail = detail,
+                characteristicUuid = characteristicId.toString(),
+            )
+            return operationFailure(
+                operation = "read-descriptor",
+                detail = detail,
+                characteristicUuid = characteristicId.toString(),
+            )
+        }
+        val started = gatt.readDescriptor(descriptor)
+        if (!started) {
+            val detail = "readDescriptor failed to start for $descriptorId"
+            reportOperationFailure(
+                reason = BlueNoxDeviceCallbacks.BlueNoxFailureReason.OPERATION_START_FAILED,
+                detail = detail,
+                characteristicUuid = characteristicId.toString(),
+            )
+            return operationFailure(
+                operation = "read-descriptor",
+                detail = detail,
+                characteristicUuid = characteristicId.toString(),
+            )
+        }
+        return operationSuccess(
+            operation = "read-descriptor",
+            detail = "Descriptor read requested",
+            characteristicUuid = characteristicId.toString(),
+        )
+    }
+
+    fun writeDescriptorByUuid(
+        serviceUuid: String,
+        characteristicUuid: String,
+        descriptorUuid: String,
+        data: ByteArray?,
+    ): Boolean {
+        return writeDescriptorByUuidResult(serviceUuid, characteristicUuid, descriptorUuid, data).success
+    }
+
+    @Suppress("DEPRECATION")
+    fun writeDescriptorByUuidResult(
+        serviceUuid: String,
+        characteristicUuid: String,
+        descriptorUuid: String,
+        data: ByteArray?,
+    ): BlueNoxGattOperationResult {
+        if (data == null) {
+            val detail = "writeDescriptorByUuid received null payload"
+            reportOperationFailure(
+                reason = BlueNoxDeviceCallbacks.BlueNoxFailureReason.INVALID_ARGUMENT,
+                detail = detail,
+                characteristicUuid = characteristicUuid,
+            )
+            return operationFailure(operation = "write-descriptor", detail = detail, characteristicUuid = characteristicUuid)
+        }
+        val serviceId = parseUuidOrFail(serviceUuid, "service")
+            ?: return operationFailure(operation = "write-descriptor", detail = "Invalid service UUID", characteristicUuid = characteristicUuid, bytes = data.size)
+        val characteristicId = parseUuidOrFail(characteristicUuid, "characteristic")
+            ?: return operationFailure(operation = "write-descriptor", detail = "Invalid characteristic UUID", characteristicUuid = characteristicUuid, bytes = data.size)
+        val descriptorId = parseUuidOrFail(descriptorUuid, "descriptor")
+            ?: return operationFailure(operation = "write-descriptor", detail = "Invalid descriptor UUID", characteristicUuid = characteristicUuid, bytes = data.size)
+        val gatt = getConnectedGattOrReport("writeDescriptorByUuid")
+            ?: return operationFailure(
+                operation = "write-descriptor",
+                detail = "GATT is not connected",
+                characteristicUuid = characteristicId.toString(),
+                bytes = data.size,
+            )
+        val descriptor = getDescriptor(serviceId, characteristicId, descriptorId)
+        if (descriptor == null) {
+            val detail = "Descriptor not found: $descriptorId on characteristic $characteristicId"
+            reportOperationFailure(
+                reason = BlueNoxDeviceCallbacks.BlueNoxFailureReason.OPERATION_START_FAILED,
+                detail = detail,
+                characteristicUuid = characteristicId.toString(),
+            )
+            return operationFailure(
+                operation = "write-descriptor",
+                detail = detail,
+                characteristicUuid = characteristicId.toString(),
+                bytes = data.size,
+            )
+        }
+        descriptor.value = data
+        val started = gatt.writeDescriptor(descriptor)
+        if (!started) {
+            val detail = "writeDescriptor failed to start for $descriptorId"
+            reportOperationFailure(
+                reason = BlueNoxDeviceCallbacks.BlueNoxFailureReason.OPERATION_START_FAILED,
+                detail = detail,
+                characteristicUuid = characteristicId.toString(),
+            )
+            return operationFailure(
+                operation = "write-descriptor",
+                detail = detail,
+                characteristicUuid = characteristicId.toString(),
+                bytes = data.size,
+            )
+        }
+        return operationSuccess(
+            operation = "write-descriptor",
+            detail = "Descriptor write requested (${data.size} byte(s))",
+            characteristicUuid = characteristicId.toString(),
+            bytes = data.size,
+        )
     }
 
     fun getMainCallback() : BlueNoxDeviceCallbacks
@@ -1449,6 +1632,22 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             }
         }
 
+        override fun uiDescriptorRead(
+            gatt: BluetoothGatt?,
+            descriptor: BluetoothGattDescriptor?,
+            status: Int,
+            value: ByteArray?,
+        ) {
+            super.uiDescriptorRead(gatt, descriptor, status, value)
+            _mutex.lock()
+            if (deviceCallbacksArrayList != null) {
+                for (cback in deviceCallbacksArrayList) {
+                    cback?.uiDescriptorRead(gatt, descriptor, status, value)
+                }
+            }
+            _mutex.unlock()
+        }
+
         override fun uiBondingChanged(device: BlueNoxDevice?, bondState: Boolean) {
             super.uiBondingChanged(device, bondState)
 
@@ -1964,11 +2163,42 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         maxChunkSize: Int,
     ): Int = writeCharacteristicSplitByUUIDResult(uuid, data, response, maxChunkSize).chunksStarted ?: 0
 
+    fun writeCharacteristicLongByUUID(
+        uuid: String,
+        data: ByteArray?,
+        response: Boolean,
+    ): BlueNoxGattOperationResult {
+        val strategy = longWriteStrategy
+        return writeCharacteristicSplitInternal(
+            uuid = uuid,
+            data = data,
+            response = response,
+            maxChunkSize = strategy.batchSize,
+            strategy = strategy,
+        )
+    }
+
     fun writeCharacteristicSplitByUUIDResult(
         uuid: String,
         data: ByteArray?,
         response: Boolean,
         maxChunkSize: Int,
+    ): BlueNoxGattOperationResult {
+        return writeCharacteristicSplitInternal(
+            uuid = uuid,
+            data = data,
+            response = response,
+            maxChunkSize = maxChunkSize,
+            strategy = longWriteStrategy.copy(batchSize = maxChunkSize),
+        )
+    }
+
+    private fun writeCharacteristicSplitInternal(
+        uuid: String,
+        data: ByteArray?,
+        response: Boolean,
+        maxChunkSize: Int,
+        strategy: BlueNoxLongWriteStrategy,
     ): BlueNoxGattOperationResult {
         if (data == null) {
             val detail = "writeCharacteristicSplitByUUID received null payload"
@@ -1989,23 +2219,51 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             return operationFailure(operation = "write-split", detail = detail, characteristicUuid = uuid, bytes = data.size)
         }
 
+        var failedChunks = 0
+        var lastFailureDetail: String? = null
         var chunksStarted = 0
         var offset = 0
+        val retryBackoffMs = strategy.retryBackoffMs
         while (offset < data.size) {
             val next = minOf(offset + maxChunkSize, data.size)
             val chunk = data.copyOfRange(offset, next)
-            val chunkResult = writeCharacteristicByUUIDResult(uuid, chunk, response)
-            if (!chunkResult.success) {
-                return operationFailure(
-                    operation = "write-split",
-                    detail = chunkResult.detail,
-                    characteristicUuid = chunkResult.characteristicUuid,
-                    bytes = data.size,
-                    chunksStarted = chunksStarted,
-                )
+            var attempts = 0
+            var chunkResult = writeCharacteristicByUUIDResult(uuid, chunk, response)
+            while (!chunkResult.success && attempts < strategy.maxRetriesPerChunk) {
+                attempts += 1
+                if (retryBackoffMs > 0L) {
+                    runCatching { Thread.sleep(retryBackoffMs) }
+                }
+                chunkResult = writeCharacteristicByUUIDResult(uuid, chunk, response)
             }
-            chunksStarted++
+            if (!chunkResult.success) {
+                failedChunks += 1
+                lastFailureDetail = chunkResult.detail
+                if (!strategy.continueOnChunkFailure) {
+                    return operationFailure(
+                        operation = "write-split",
+                        detail = chunkResult.detail,
+                        characteristicUuid = chunkResult.characteristicUuid,
+                        bytes = data.size,
+                        chunksStarted = chunksStarted,
+                    )
+                }
+            } else {
+                chunksStarted++
+            }
             offset = next
+            if (strategy.interChunkDelayMs > 0L && offset < data.size) {
+                runCatching { Thread.sleep(strategy.interChunkDelayMs) }
+            }
+        }
+        if (failedChunks > 0) {
+            return operationFailure(
+                operation = "write-split",
+                detail = "Split write finished with $failedChunks failed chunk(s). Last failure: ${lastFailureDetail ?: "unknown"}",
+                characteristicUuid = runCatching { UUID.fromString(uuid).toString() }.getOrNull() ?: uuid,
+                bytes = data.size,
+                chunksStarted = chunksStarted,
+            )
         }
         return operationSuccess(
             operation = "write-split",
