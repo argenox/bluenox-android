@@ -1865,15 +1865,6 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         return connectionTimeoutCount == 0
     }
 
-
-//    fun getDevice() : BluetoothDevice?
-//    {
-//        if(BluenoxLEManager.getInstance().checkRequiredPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
-//            return device
-//        }
-//        return null
-//    }
-
     /** Bluetooth address from [device], or empty string if device is null. */
     val mACAddress: String
         get() = if (device == null) {

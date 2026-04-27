@@ -57,7 +57,6 @@ import com.argenox.bluenoxandroid.BLEUUIDs
 import com.argenox.bluenoxandroid.ProximityEngine
 import java.lang.reflect.Method
 import java.nio.ByteBuffer
-import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.ArrayBlockingQueue
@@ -155,22 +154,6 @@ public class BluenoxLEManager
         {
             tracingEnabled = enabled
         }
-    }
-
-    /**
-     * Events handled in Callback
-     *
-     */
-    private enum class BluenoxDeviceState(val evt: Int) {
-
-        /** BlueNox Device Disconnected */
-        BLUENOX_DEVICE_STATE_DISCONNECTED(0),
-
-        /** BlueNox Device Connecting */
-        BLUENOX_DEVICE_STATE_CONNECTING(1),
-
-        /** BlueNox Device Connecting */
-        BLUENOX_DEVICE_STATE_CONNECTED(2),
     }
 
     /**
@@ -347,46 +330,12 @@ public class BluenoxLEManager
         }
     }
 
-    private class BlueNoxClassicDeviceInternal(var name: String?, var addr: String?, var needsConn: Boolean, var dev: BluetoothDevice?) {
-        var connected: Boolean = false
-        var needsConnection: Boolean = needsConn
-        lateinit var connectionStartTimestamp : Instant
-        var state: BluenoxDeviceState = BluenoxDeviceState.BLUENOX_DEVICE_STATE_DISCONNECTED
-
-        fun startConnection()
-        {
-            connectionStartTimestamp = Instant.now()
-            state = BluenoxDeviceState.BLUENOX_DEVICE_STATE_CONNECTING
-        }
-    }
-
     /**
      * Library build/version string embedded in the manager singleton.
      */
     fun getVersion(): String {
         return version
     }
-
-
-
-    @SuppressLint("MissingPermission")
-    private fun startDeviceDiscovery()
-    {
-        val result = bluetoothAdapter.startDiscovery();
-        if(result)
-        {
-            dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_DEBUG, MODULE_TAG,
-                "Discovery Started")
-        }
-        else
-        {
-            dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_DEBUG, MODULE_TAG,
-                "Discovery Start Failed")
-        }
-    }
-
-
-
     /**
      * Registers an event callback handler to the manager
      *
@@ -411,16 +360,6 @@ public class BluenoxLEManager
     public fun unregisterCallback(handler: (evt: BluenoxEvents, String, String) -> Unit): Boolean {
         return callbackList.remove(handler)
     }
-
-
-    @Suppress("NOTHING_TO_INLINE")
-    private inline fun getLineNum():Int
-    {
-        return Throwable().stackTrace[0].lineNumber
-
-    }
-
-
 
     /**
      * Validates Permissions ensuring all required permissions are enabled
@@ -489,7 +428,6 @@ public class BluenoxLEManager
                 }
 
                 device.connect(callback)
-                //device.connect()
 
                 return true
             }
@@ -797,36 +735,6 @@ public class BluenoxLEManager
         }
     }
 
-    private fun handleTimerTickFunction()
-    {
-        /* Check to see if any devices are connecting */
-        for(d in classicDeviceList)
-        {
-            if(d.state == BluenoxDeviceState.BLUENOX_DEVICE_STATE_CONNECTING)
-            {
-                val dur = Duration.between(d.connectionStartTimestamp, Instant.now())
-                if( dur.seconds >= 7)
-                {
-
-                    d.state = BluenoxDeviceState.BLUENOX_DEVICE_STATE_DISCONNECTED
-
-                    var name = ""
-                    var addr = ""
-                    /* Device Connection Failed */
-                    if(d.name != null) {
-                        name = d.name!!
-                    }
-
-                    if(d.addr != null) {
-                        addr = d.addr!!
-                    }
-
-                    queueEvent(BluenoxEvents.BLUENOX_EVT_DEVICE_CONNECTION_FAILED, name, addr)
-                }
-            }
-        }
-    }
-
     /**
      * Sets the minimum log level for internal [BlueNoxDebug] output from this manager.
      *
@@ -874,9 +782,7 @@ public class BluenoxLEManager
 
                         when(evt.id)
                         {
-                            BluenoxThreadEvents.BLUENOX_THREAD_EVT_TIMER_TICK -> {
-                                handleTimerTickFunction();
-                            }
+                            BluenoxThreadEvents.BLUENOX_THREAD_EVT_TIMER_TICK -> Unit
                             BluenoxThreadEvents.BLUENOX_THREAD_EVT_TIMER_FINISH ->{
 
                             }
@@ -1720,32 +1626,6 @@ public class BluenoxLEManager
         }
     }
 
-//    fun connectByAddress(addr: String)
-//    {
-//        if (callback != null) {
-//            addListener(callback)
-//        }
-//
-//        if (mbleConnCallback == null) {
-//            Log.d(MODULE_TAG, "Setting new mbleConnCallback")
-//            mbleConnCallback = BluenoxGATTCallback(mMainCallback, "connectionCallback")
-//        }
-//
-//        mCurrentlyConnecting = true
-//
-//        if(BluenoxLEManager.getInstance().checkRequiredPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
-//            device!!.connectGatt(mParent, false, mbleConnCallback)
-//        }
-//
-//        enableReconnection()
-//        resetConnectionTimeoutCount(4000)
-//
-//        BluenoxLEManager.getInstance().setActiveDevice(this)
-//
-//        //startConnectionTimer();
-//    }
-
-
     /**
      * Tears down scanning, timers, broadcast receiver, and marks the manager uninitialized.
      *
@@ -1875,9 +1755,6 @@ public class BluenoxLEManager
 
 
         var initComplete = false
-        private val classicDeviceList = ArrayList<BlueNoxClassicDeviceInternal>()
-        private val classicDeviceFoundList = ArrayList<BlueNoxClassicDeviceInternal>()
-
         private val debugLog = BluenoxDebugLog()
 
         private lateinit var threadTimer : CountDownTimer
