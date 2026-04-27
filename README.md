@@ -28,7 +28,7 @@ We built the original Android BlueNox library back in 2015, when Android 4 Bluet
 had every kind of issue you could imagine. We've updated it in the years since to support
 every version.
 
-A few years ago we modernized the library to Kotlin and began shipping that version in application. We're releasing it because we want to make it easier for devleopers to write amazing BLE enabled applications.
+A few years ago we modernized the library to Kotlin and began shipping that version in application. We're releasing it because we want to make it easier for developers to write amazing BLE enabled applications.
 
 ## Features
 
