@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.argenox"
-version = (findProperty("VERSION_NAME") as String?) ?: "0.2.52"
+version = (findProperty("VERSION_NAME") as String?) ?: "0.2.53"
 
 android {
     namespace = "com.argenox.bluenoxandroid"

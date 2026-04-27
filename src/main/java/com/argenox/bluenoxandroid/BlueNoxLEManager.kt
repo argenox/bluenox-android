@@ -36,10 +36,12 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.location.LocationManager
 import android.os.Build
 import android.os.CountDownTimer
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.argenox.bluenoxandroid.BlueNoxDebug.DebugLevels
@@ -60,6 +62,9 @@ import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.ArrayBlockingQueue
 import kotlin.concurrent.thread
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 
 /**
@@ -86,6 +91,8 @@ public class BluenoxLEManager
     private var scanAdvertisingDataTypeFilter: Int? = null
 
     private var mActiveDevice : BlueNoxDevice? = null
+    private val readinessStateFlow = MutableStateFlow(BlueNoxManagerReadinessState.Uninitialized)
+    private val readinessStatusFlow = MutableStateFlow(BlueNoxManagerReadinessStatus.UNINITIALIZED)
 
     /* defines (in milliseconds) how often RSSI should be updated */
     private val RSSI_UPDATE_TIME_INTERVAL = 1500 // 1.5 seconds
@@ -488,6 +495,56 @@ public class BluenoxLEManager
         }
 
         return false
+    }
+
+    @SuppressLint("MissingPermission")
+    fun connectByMac(addr: String, callback: BlueNoxDeviceCallbacks): Boolean {
+        if (addr.isBlank()) {
+            return false
+        }
+        if (connectByAddress(addr, callback)) {
+            return true
+        }
+        if (!checkRequiredPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+            return false
+        }
+        val target = runCatching { bluetoothAdapter.getRemoteDevice(addr) }.getOrNull() ?: return false
+        mBlueNoxDeviceStore?.addDevice(target, mdeviceClass, 0, null)
+        return connectByAddress(addr, callback)
+    }
+
+    fun scanAndConnect(addr: String, timeout: Long, callback: BlueNoxDeviceCallbacks): Boolean {
+        if (addr.isBlank()) {
+            return false
+        }
+        if (connectByAddress(addr, callback)) {
+            return true
+        }
+
+        var completed = false
+        lateinit var scanHandler: (evt: BluenoxEvents, String, String) -> Unit
+        scanHandler = { evt, _, eventAddr ->
+            if (!completed) {
+                if (evt == BluenoxEvents.BLUENOX_EVT_DEVICE_FOUND &&
+                    eventAddr.equals(addr, ignoreCase = true)
+                ) {
+                    completed = true
+                    stopScanning()
+                    Handler(Looper.getMainLooper()).post { unregisterCallback(scanHandler) }
+                    connectByAddress(addr, callback)
+                } else if (evt == BluenoxEvents.BLUENOX_EVT_SCAN_STOP) {
+                    completed = true
+                    Handler(Looper.getMainLooper()).post { unregisterCallback(scanHandler) }
+                }
+            }
+        }
+        registerCallback(scanHandler)
+        val started = scanWithAddress(addr, timeout)
+        if (!started) {
+            unregisterCallback(scanHandler)
+            return false
+        }
+        return true
     }
 
 
@@ -896,6 +953,8 @@ public class BluenoxLEManager
 
         filter.addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
         filter.addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
+        filter.addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
+        filter.addAction(LocationManager.MODE_CHANGED_ACTION)
 
 //        filter.addAction(BluetoothDevice.ACTION_CLASS_CHANGED)
 //        filter.addAction(BluetoothDevice.ACTION_FOUND)
@@ -907,6 +966,7 @@ public class BluenoxLEManager
         receiverRegistered = true
 
         initComplete = true
+        refreshReadinessState()
         return true;
     }
 
@@ -914,6 +974,161 @@ public class BluenoxLEManager
     fun isInitialized(): Boolean
     {
         return initComplete
+    }
+
+    fun readinessState(): StateFlow<BlueNoxManagerReadinessState> {
+        return readinessStateFlow.asStateFlow()
+    }
+
+    fun readinessStatus(): StateFlow<BlueNoxManagerReadinessStatus> {
+        return readinessStatusFlow.asStateFlow()
+    }
+
+    fun currentReadinessState(): BlueNoxManagerReadinessState {
+        return readinessStateFlow.value
+    }
+
+    fun currentReadinessStatus(): BlueNoxManagerReadinessStatus {
+        return readinessStatusFlow.value
+    }
+
+    fun getRecommendedScanRuntimePermissions(deriveLocationFromScan: Boolean = false): Array<String> {
+        return when {
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.M -> emptyArray()
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.Q -> arrayOf(
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+            )
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.S -> arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+            deriveLocationFromScan -> arrayOf(
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+            )
+            else -> arrayOf(Manifest.permission.BLUETOOTH_SCAN)
+        }
+    }
+
+    fun getRecommendedConnectRuntimePermissions(): Array<String> {
+        return if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            emptyArray()
+        } else {
+            arrayOf(Manifest.permission.BLUETOOTH_CONNECT)
+        }
+    }
+
+    fun isScanRuntimePermissionGranted(deriveLocationFromScan: Boolean = false): Boolean {
+        return when {
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.M -> true
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.Q -> {
+                isPermissionGranted(Manifest.permission.ACCESS_COARSE_LOCATION) ||
+                    isPermissionGranted(Manifest.permission.ACCESS_FINE_LOCATION)
+            }
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.S -> {
+                isPermissionGranted(Manifest.permission.ACCESS_FINE_LOCATION)
+            }
+            deriveLocationFromScan -> {
+                isPermissionGranted(Manifest.permission.BLUETOOTH_SCAN) &&
+                    isPermissionGranted(Manifest.permission.ACCESS_FINE_LOCATION)
+            }
+            else -> isPermissionGranted(Manifest.permission.BLUETOOTH_SCAN)
+        }
+    }
+
+    fun isConnectRuntimePermissionGranted(): Boolean {
+        return if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            true
+        } else {
+            isPermissionGranted(Manifest.permission.BLUETOOTH_CONNECT)
+        }
+    }
+
+    fun getMissingScanRuntimePermissions(deriveLocationFromScan: Boolean = false): Array<String> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return emptyArray()
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            val coarseGranted = isPermissionGranted(Manifest.permission.ACCESS_COARSE_LOCATION)
+            val fineGranted = isPermissionGranted(Manifest.permission.ACCESS_FINE_LOCATION)
+            return if (coarseGranted || fineGranted) {
+                emptyArray()
+            } else {
+                arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION)
+            }
+        }
+        return getRecommendedScanRuntimePermissions(deriveLocationFromScan)
+            .filterNot { isPermissionGranted(it) }
+            .toTypedArray()
+    }
+
+    fun getMissingConnectRuntimePermissions(): Array<String> {
+        return getRecommendedConnectRuntimePermissions()
+            .filterNot { isPermissionGranted(it) }
+            .toTypedArray()
+    }
+
+    fun refreshReadinessState(): BlueNoxManagerReadinessState {
+        val state = computeReadinessState()
+        readinessStateFlow.value = state
+        readinessStatusFlow.value = computeReadinessStatus(state)
+        return state
+    }
+
+    private fun isPermissionGranted(permission: String): Boolean {
+        if (!initComplete) {
+            return false
+        }
+        return ContextCompat.checkSelfPermission(
+            managerContext,
+            permission,
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun computeReadinessState(): BlueNoxManagerReadinessState {
+        if (!initComplete) {
+            return BlueNoxManagerReadinessState.Uninitialized
+        }
+        val hardwareCompatible = runCatching { checkHardwareCompatible(managerContext) }.getOrDefault(false)
+        val bluetoothEnabled = runCatching { bluetoothAdapter.isEnabled }.getOrDefault(false)
+        val permissionsGranted = isScanRuntimePermissionGranted(deriveLocationFromScan = true) &&
+            isConnectRuntimePermissionGranted()
+        val locationServicesEnabled = isLocationServicesEnabled(managerContext)
+        val ready = hardwareCompatible && bluetoothEnabled && permissionsGranted && locationServicesEnabled
+        return BlueNoxManagerReadinessState(
+            initialized = true,
+            bluetoothEnabled = bluetoothEnabled,
+            permissionsGranted = permissionsGranted,
+            locationServicesEnabled = locationServicesEnabled,
+            hardwareCompatible = hardwareCompatible,
+            ready = ready,
+        )
+    }
+
+    private fun computeReadinessStatus(state: BlueNoxManagerReadinessState): BlueNoxManagerReadinessStatus {
+        return when {
+            !state.initialized -> BlueNoxManagerReadinessStatus.UNINITIALIZED
+            !state.hardwareCompatible -> BlueNoxManagerReadinessStatus.BLUETOOTH_NOT_AVAILABLE
+            !state.bluetoothEnabled -> BlueNoxManagerReadinessStatus.BLUETOOTH_NOT_ENABLED
+            !state.permissionsGranted -> BlueNoxManagerReadinessStatus.PERMISSIONS_NOT_GRANTED
+            !state.locationServicesEnabled -> BlueNoxManagerReadinessStatus.LOCATION_SERVICES_NOT_ENABLED
+            else -> BlueNoxManagerReadinessStatus.READY
+        }
+    }
+
+    private fun isLocationServicesEnabled(ctx: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return true
+        }
+        val locationManager = ctx.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return false
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            locationManager.isLocationEnabled
+        } else {
+            val mode = Settings.Secure.getInt(
+                ctx.contentResolver,
+                Settings.Secure.LOCATION_MODE,
+                Settings.Secure.LOCATION_MODE_OFF,
+            )
+            mode != Settings.Secure.LOCATION_MODE_OFF
+        }
     }
 
     private fun isBluetoothEnabled(): Boolean
@@ -946,15 +1161,10 @@ public class BluenoxLEManager
 
         /* Ensure Adapter is still On, otherwise we shouldn't stop */
         if (isBluetoothEnabled() && isScanning) {
-
-            when {
-                ContextCompat.checkSelfPermission(
-                    managerContext, Manifest.permission.BLUETOOTH_SCAN
-                ) == PackageManager.PERMISSION_GRANTED -> {
-                    bluetoothLeScanner.stopScan(leScanCallback)
-                    isScanning = false
-                }
+            if (checkRequiredPermission(Manifest.permission.BLUETOOTH_SCAN)) {
+                bluetoothLeScanner.stopScan(leScanCallback)
             }
+            isScanning = false
         }
     }
 
@@ -992,7 +1202,7 @@ public class BluenoxLEManager
      *
      */
     @Suppress("unused")
-    fun scanWithAddress(addr: String?, timeout: Long) {
+    fun scanWithAddress(addr: String?, timeout: Long): Boolean {
         clearCustomScanFilters()
         var settings: ScanSettings? = null
         val filters: MutableList<ScanFilter> = ArrayList()
@@ -1012,7 +1222,7 @@ public class BluenoxLEManager
                 "Null Pointer Error  $e")
         }
 
-        startScanning(timeout, filters, settings)
+        return startScanning(timeout, filters, settings)
     }
 
     /**
@@ -1212,15 +1422,24 @@ public class BluenoxLEManager
                 .build()
         }
 
-        isScanning = true
-
-        when {
-            ContextCompat.checkSelfPermission(
-                managerContext, Manifest.permission.BLUETOOTH_SCAN
-            ) == PackageManager.PERMISSION_GRANTED -> {
-                bluetoothLeScanner.startScan(filters, curSettings, leScanCallback)
-            }
+        if (!checkRequiredPermission(Manifest.permission.BLUETOOTH_SCAN)) {
+            dbgObj.debugPrint(
+                BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_WARNING,
+                MODULE_TAG,
+                "Cannot start scan: missing required scan permission",
+            )
+            return false
         }
+
+        val scanner = runCatching { bluetoothLeScanner }
+            .getOrElse {
+                val resolved = bluetoothAdapter.bluetoothLeScanner
+                bluetoothLeScanner = resolved
+                resolved
+            }
+
+        scanner.startScan(filters, curSettings, leScanCallback)
+        isScanning = true
 
 
 
@@ -1364,6 +1583,10 @@ public class BluenoxLEManager
 
             when (action)
             {
+                BluetoothAdapter.ACTION_STATE_CHANGED,
+                LocationManager.MODE_CHANGED_ACTION -> {
+                    refreshReadinessState()
+                }
                 BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
 
                     dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_DEBUG, MODULE_TAG,
@@ -1472,6 +1695,8 @@ public class BluenoxLEManager
         runThread = false
         queueEventId(BluenoxThreadEvents.BLUENOX_THREAD_EVT_TIMER_FINISH)
         initComplete = false
+        readinessStateFlow.value = BlueNoxManagerReadinessState.Uninitialized
+        readinessStatusFlow.value = BlueNoxManagerReadinessStatus.UNINITIALIZED
     }
 
 

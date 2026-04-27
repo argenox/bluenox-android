@@ -164,6 +164,15 @@ interface BlueNoxDeviceCallbacks {
     )
 
     @Suppress("unused")
+    fun uiDescriptorRead(
+        gatt: BluetoothGatt?,
+        descriptor: BluetoothGattDescriptor?,
+        status: Int,
+        value: ByteArray?,
+    ) {
+    }
+
+    @Suppress("unused")
     fun uiCccdConfigured(
         device: BlueNoxDevice?,
         result: BlueNoxCccdConfigurationResult,
@@ -274,6 +283,14 @@ interface BlueNoxDeviceCallbacks {
             gatt: BluetoothGatt?,
             descriptor: BluetoothGattDescriptor?,
             status: Int
+        ) {
+        }
+
+        override fun uiDescriptorRead(
+            gatt: BluetoothGatt?,
+            descriptor: BluetoothGattDescriptor?,
+            status: Int,
+            value: ByteArray?,
         ) {
         }
 
