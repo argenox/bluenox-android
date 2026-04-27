@@ -1,9 +1,14 @@
 package com.argenox.bluenoxandroid
 
 /**
- * Represents current BLE readiness for the manager.
+ * Snapshot of whether BLE operations are likely to succeed for this process.
  *
- * This combines hardware, adapter, permissions, and location-service requirements.
+ * @property initialized [BluenoxLEManager.initialize] completed successfully.
+ * @property bluetoothEnabled The default adapter is powered on.
+ * @property permissionsGranted Scan (with location-from-scan) and connect runtime permissions are granted.
+ * @property locationServicesEnabled System location is enabled (required for many scans on API 23+).
+ * @property hardwareCompatible The device reports [PackageManager.FEATURE_BLUETOOTH_LE].
+ * @property ready All of the above allow typical foreground scan + connect flows.
  */
 data class BlueNoxManagerReadinessState(
     val initialized: Boolean,
@@ -14,6 +19,7 @@ data class BlueNoxManagerReadinessState(
     val ready: Boolean,
 ) {
     companion object {
+        /** Default state before [BluenoxLEManager.initialize] or after [BluenoxLEManager.uninitialize]. */
         val Uninitialized = BlueNoxManagerReadinessState(
             initialized = false,
             bluetoothEnabled = false,

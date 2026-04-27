@@ -1,9 +1,13 @@
 package com.argenox.bluenoxandroid
 
 /**
- * Configures behavior for long/split characteristic writes.
+ * Configures behavior for long/split characteristic writes on [BlueNoxDevice].
  *
- * This strategy controls chunk sizing and how chunk failures are handled.
+ * @property batchSize Maximum payload bytes per GATT write chunk.
+ * @property continueOnChunkFailure If true, remaining chunks are attempted after a chunk failure; if false, the whole write stops on first failure.
+ * @property maxRetriesPerChunk Extra attempts per chunk after the first failure (0 = no retries).
+ * @property retryBackoffMs Delay between retry attempts for the same chunk.
+ * @property interChunkDelayMs Optional pause after each successful chunk before starting the next.
  */
 data class BlueNoxLongWriteStrategy(
     val batchSize: Int = 20,
@@ -20,6 +24,7 @@ data class BlueNoxLongWriteStrategy(
     }
 
     companion object {
+        /** Default strategy: 20-byte chunks, no retries, no inter-chunk delay. */
         val Default = BlueNoxLongWriteStrategy()
     }
 }

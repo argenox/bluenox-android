@@ -68,14 +68,13 @@ import kotlinx.coroutines.flow.asStateFlow
 
 
 /**
- * BlueNox Classic Manager
+ * Singleton entry point for BLE scanning, device discovery, connection orchestration,
+ * and manager-level events.
  *
- * This module provides management capabilities for Bluetooth Classic devices
- * such as those supporting SPP, A2DP and HFP/HSP profiles.
- *
- * The class is implemented as a singleton and only one instance of the class will be
- * available which can be accessed by calling BluenoxClassicManager.getInstance()
- *
+ * Obtain the shared instance with [getInstance]. Call [initialize] after runtime
+ * permissions from [requiredPermissions] are granted, then use scan/connect APIs.
+ * Subscribe to [readinessState] or [readinessStatus] for permission, adapter, and
+ * location-service readiness.
  */
 public class BluenoxLEManager
 {
@@ -362,8 +361,7 @@ public class BluenoxLEManager
     }
 
     /**
-     * Provides the version of the BlueNox Classic Manager
-     *
+     * Library build/version string embedded in the manager singleton.
      */
     fun getVersion(): String {
         return version
@@ -451,6 +449,11 @@ public class BluenoxLEManager
         return true
     }
 
+    /**
+     * Optional custom [BlueNoxDevice] subclass used when materializing devices from scan results.
+     *
+     * @param c Must be a non-abstract [BlueNoxDevice] subclass with a no-arg constructor, or null to use [BlueNoxDevice].
+     */
     @Suppress("unused")
     fun setDeviceClass(c: Class<*>?) {
         this.mdeviceClass = c
@@ -468,13 +471,11 @@ public class BluenoxLEManager
     }
 
     /**
-     * Connects to the specified Device
+     * Starts GATT connect for a device already in the scan store (must have been seen in scan or added explicitly).
      *
-     * @param addr MAC address of the device to connect
-     * @param callback callbacks for device events
-     *
-     * @return a list of BlueNoxClassicDevice found in scan results
-     *
+     * @param addr MAC address of the peripheral.
+     * @param callback GATT and device lifecycle callbacks.
+     * @return true if [BlueNoxDevice.connect] was started, false if the device is missing or [Manifest.permission.BLUETOOTH_CONNECT] is denied.
      */
     @SuppressLint("MissingPermission")
     public fun connectByAddress(addr: String, callback: BlueNoxDeviceCallbacks): Boolean
@@ -497,6 +498,13 @@ public class BluenoxLEManager
         return false
     }
 
+    /**
+     * Connects to a peripheral by MAC, creating a [BlueNoxDevice] in the store if it was not seen in a recent scan.
+     *
+     * @param addr Bluetooth hardware address (e.g. `"AA:BB:CC:DD:EE:FF"`).
+     * @param callback GATT and device lifecycle callbacks.
+     * @return true if a connect was started, false if permissions are missing or the address is invalid.
+     */
     @SuppressLint("MissingPermission")
     fun connectByMac(addr: String, callback: BlueNoxDeviceCallbacks): Boolean {
         if (addr.isBlank()) {
@@ -513,6 +521,16 @@ public class BluenoxLEManager
         return connectByAddress(addr, callback)
     }
 
+    /**
+     * Scans for a specific address then starts [connectByAddress] when the device is found.
+     *
+     * Registers a temporary manager callback; it is removed when the device is found or when the scan stops.
+     *
+     * @param addr Target MAC address.
+     * @param timeout Scan duration in milliseconds (same semantics as [scanWithAddress]).
+     * @param callback GATT callbacks passed through to [connectByAddress].
+     * @return false if the address is blank, scan could not start, or the device was already connectable from the store.
+     */
     fun scanAndConnect(addr: String, timeout: Long, callback: BlueNoxDeviceCallbacks): Boolean {
         if (addr.isBlank()) {
             return false
@@ -549,13 +567,9 @@ public class BluenoxLEManager
 
 
     /**
-     * Connects to the specified Device
+     * Returns the [BlueNoxDevice] for [addr] if it exists in the current scan/device store.
      *
-     * @param addr MAC address of the device to connect
-     * @param callback callbacks for device events
-     *
-     * @return a list of BlueNoxClassicDevice found in scan results
-     *
+     * @param addr MAC address of the peripheral.
      */
     @SuppressLint("MissingPermission")
     public fun getDeviceByAddress(addr: String): BlueNoxDevice?
@@ -575,10 +589,7 @@ public class BluenoxLEManager
     }
 
     /**
-     * Retrieves the first connected device
-     *
-     * @return an instance of BlueNoxDevice that is connected, null otherwise
-     *
+     * Returns the first device in the store whose GATT profile reports [BluetoothProfile.STATE_CONNECTED], if any.
      */
     @SuppressLint("MissingPermission")
     public fun getConnectedDevice(): BlueNoxDevice?
@@ -595,12 +606,10 @@ public class BluenoxLEManager
     }
 
     /**
-     * Disconnects the device
+     * Disconnects the device with the given MAC if it exists in the store.
      *
-     * @param addr the MAC address of the device
-     *
-     * @return true if disconnection initiated, false if unable to start disconnection
-     *
+     * @param addr MAC address of the peripheral to disconnect.
+     * @return true if a matching device was found and disconnect was requested.
      */
     @SuppressLint("MissingPermission")
     public fun disconnect(addr: String): Boolean
@@ -622,12 +631,9 @@ public class BluenoxLEManager
     }
 
     /**
-     * Disconnects the device
+     * Disconnects the given [BlueNoxDevice] if [Manifest.permission.BLUETOOTH_CONNECT] is granted.
      *
-     * @param addr the MAC address of the device
-     *
-     * @return true if disconnection initiated, false if unable to start disconnection
-     *
+     * @param dev Device wrapper returned from scan or [getDeviceByAddress].
      */
     @SuppressLint("MissingPermission")
     public fun disconnect(dev: BlueNoxDevice): Boolean
@@ -641,12 +647,7 @@ public class BluenoxLEManager
     }
 
     /**
-     * Disconnects the device
-     *
-     * @param addr the MAC address of the device
-     *
-     * @return true if disconnection initiated, false if unable to start disconnection
-     *
+     * Requests disconnect on every device currently held in the store.
      */
     @SuppressLint("MissingPermission")
     public fun disconnectAll(): Boolean
@@ -667,10 +668,7 @@ public class BluenoxLEManager
     }
 
     /**
-     * Returns the Scan Results
-     *
-     * @return a list of BlueNoxClassicDevice found in scan results
-     *
+     * Copy of all [BlueNoxDevice] instances currently in the scan/device store.
      */
     @SuppressLint("MissingPermission")
     public fun scanResults() : ArrayList<BlueNoxDevice>
@@ -683,7 +681,7 @@ public class BluenoxLEManager
     }
 
     /**
-     * Clears currently cached scan results.
+     * Removes all entries from the scan/device store (does not necessarily disconnect).
      */
     public fun clearScanResults()
     {
@@ -691,9 +689,7 @@ public class BluenoxLEManager
     }
 
     /**
-     * Retrieves a list of bonded devices
-     *
-     * @return a list of all Bonded Devices
+     * Lists paired (bonded) devices from the platform adapter with basic type and audio metadata.
      */
     @SuppressLint("MissingPermission")
     public fun bondedDevices() : ArrayList<BlueNoxClassicDevice>
@@ -831,6 +827,11 @@ public class BluenoxLEManager
         }
     }
 
+    /**
+     * Sets the minimum log level for internal [BlueNoxDebug] output from this manager.
+     *
+     * @param lvl Minimum level to print (errors only vs verbose debug).
+     */
     public fun setDebugLevel(lvl: DebugLevels) {
         dbgObj.setDebugLevel(lvl)
     }
@@ -909,15 +910,13 @@ public class BluenoxLEManager
     }
 
     /**
-     * Initializes the BlueNox Classic Manager
+     * Prepares Bluetooth services, the device store, background thread, and broadcast receivers.
      *
-     * This functions must be called once before other APIs are accessed except
+     * Call once per process (typically from `Application` or after permission grant). Requires
+     * all [requiredPermissions] to be granted first.
      *
-     * @param context is the application context
-     *
-     * @return true if successful, false if not. In case of failure, the
-     *         initialization should be called
-     *
+     * @param context Any [Context]; [Context.getApplicationContext] is used internally.
+     * @return true if initialization succeeded; false if permissions are missing or setup failed.
      */
     fun initialize(context: Context) : Boolean {
 
@@ -971,27 +970,44 @@ public class BluenoxLEManager
     }
 
 
+    /**
+     * Whether [initialize] completed successfully and [uninitialize] has not cleared state.
+     */
     fun isInitialized(): Boolean
     {
         return initComplete
     }
 
+    /**
+     * Hot stream of detailed readiness flags; updates when Bluetooth, permissions, or location mode change.
+     */
     fun readinessState(): StateFlow<BlueNoxManagerReadinessState> {
         return readinessStateFlow.asStateFlow()
     }
 
+    /**
+     * Hot stream of coarse readiness status for UI routing (see [BlueNoxManagerReadinessStatus]).
+     */
     fun readinessStatus(): StateFlow<BlueNoxManagerReadinessStatus> {
         return readinessStatusFlow.asStateFlow()
     }
 
+    /** Latest [BlueNoxManagerReadinessState] snapshot without subscribing. */
     fun currentReadinessState(): BlueNoxManagerReadinessState {
         return readinessStateFlow.value
     }
 
+    /** Latest [BlueNoxManagerReadinessStatus] snapshot without subscribing. */
     fun currentReadinessStatus(): BlueNoxManagerReadinessStatus {
         return readinessStatusFlow.value
     }
 
+    /**
+     * Suggested runtime permission strings to request before BLE scanning for this OS version.
+     *
+     * @param deriveLocationFromScan If true and API 31+, includes [Manifest.permission.ACCESS_FINE_LOCATION]
+     *        alongside [Manifest.permission.BLUETOOTH_SCAN] (when scan is used for user location).
+     */
     fun getRecommendedScanRuntimePermissions(deriveLocationFromScan: Boolean = false): Array<String> {
         return when {
             Build.VERSION.SDK_INT < Build.VERSION_CODES.M -> emptyArray()
@@ -1008,6 +1024,9 @@ public class BluenoxLEManager
         }
     }
 
+    /**
+     * Suggested runtime permission strings before GATT connect on API 31+ ([Manifest.permission.BLUETOOTH_CONNECT]).
+     */
     fun getRecommendedConnectRuntimePermissions(): Array<String> {
         return if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
             emptyArray()
@@ -1016,6 +1035,11 @@ public class BluenoxLEManager
         }
     }
 
+    /**
+     * Whether the process currently holds permissions needed to start a BLE scan for this API level.
+     *
+     * @param deriveLocationFromScan Must match how you intend to use scan results (see [getRecommendedScanRuntimePermissions]).
+     */
     fun isScanRuntimePermissionGranted(deriveLocationFromScan: Boolean = false): Boolean {
         return when {
             Build.VERSION.SDK_INT < Build.VERSION_CODES.M -> true
@@ -1034,6 +1058,7 @@ public class BluenoxLEManager
         }
     }
 
+    /** Whether [Manifest.permission.BLUETOOTH_CONNECT] is granted on API 31+ (always true below 31). */
     fun isConnectRuntimePermissionGranted(): Boolean {
         return if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
             true
@@ -1042,6 +1067,11 @@ public class BluenoxLEManager
         }
     }
 
+    /**
+     * Subset of [getRecommendedScanRuntimePermissions] that are not currently granted.
+     *
+     * @param deriveLocationFromScan Same semantics as [isScanRuntimePermissionGranted].
+     */
     fun getMissingScanRuntimePermissions(deriveLocationFromScan: Boolean = false): Array<String> {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             return emptyArray()
@@ -1060,12 +1090,18 @@ public class BluenoxLEManager
             .toTypedArray()
     }
 
+    /** Subset of [getRecommendedConnectRuntimePermissions] that are not currently granted. */
     fun getMissingConnectRuntimePermissions(): Array<String> {
         return getRecommendedConnectRuntimePermissions()
             .filterNot { isPermissionGranted(it) }
             .toTypedArray()
     }
 
+    /**
+     * Recomputes readiness from current adapter, permission, and location state and publishes to both flows.
+     *
+     * @return The new [BlueNoxManagerReadinessState] value.
+     */
     fun refreshReadinessState(): BlueNoxManagerReadinessState {
         val state = computeReadinessState()
         readinessStateFlow.value = state
@@ -1073,6 +1109,7 @@ public class BluenoxLEManager
         return state
     }
 
+    /** Returns whether [permission] is granted for [managerContext] while the manager is initialized. */
     private fun isPermissionGranted(permission: String): Boolean {
         if (!initComplete) {
             return false
@@ -1083,6 +1120,7 @@ public class BluenoxLEManager
         ) == PackageManager.PERMISSION_GRANTED
     }
 
+    /** Builds a [BlueNoxManagerReadinessState] from hardware, adapter, permissions, and location services. */
     private fun computeReadinessState(): BlueNoxManagerReadinessState {
         if (!initComplete) {
             return BlueNoxManagerReadinessState.Uninitialized
@@ -1103,6 +1141,7 @@ public class BluenoxLEManager
         )
     }
 
+    /** Maps [BlueNoxManagerReadinessState] fields to a single [BlueNoxManagerReadinessStatus] label. */
     private fun computeReadinessStatus(state: BlueNoxManagerReadinessState): BlueNoxManagerReadinessStatus {
         return when {
             !state.initialized -> BlueNoxManagerReadinessStatus.UNINITIALIZED
@@ -1114,6 +1153,7 @@ public class BluenoxLEManager
         }
     }
 
+    /** Whether system location is enabled (API 23+); scanning often requires this alongside location permission. */
     private fun isLocationServicesEnabled(ctx: Context): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             return true
@@ -1168,6 +1208,9 @@ public class BluenoxLEManager
         }
     }
 
+    /**
+     * Stops an active LE scan if running and emits [BluenoxEvents.BLUENOX_EVT_SCAN_STOP] when applicable.
+     */
     fun stopScanning()
     {
         stopScanningInternal()
@@ -1176,15 +1219,28 @@ public class BluenoxLEManager
             queueEvent(BluenoxEvents.BLUENOX_EVT_SCAN_STOP, "", "")
     }
 
+    /**
+     * When true, scan settings use legacy advertising path where supported ([ScanSettings.setLegacy]).
+     *
+     * @param legacy Pass true for legacy-only behavior on compatible stacks.
+     */
     fun scanSetLegacy(legacy: Boolean) {
         useLegacyScanning = legacy
     }
 
+    /**
+     * Last device marked active via [setActiveDevice], if any (app-defined hint, not OS connection state).
+     */
     fun getActiveDevice() : BlueNoxDevice?
     {
         return mActiveDevice
     }
 
+    /**
+     * Records which [BlueNoxDevice] the app considers primary for UI or logging.
+     *
+     * @param d Device to treat as active.
+     */
     fun setActiveDevice(d: BlueNoxDevice )
     {
         mActiveDevice = d
@@ -1446,6 +1502,11 @@ public class BluenoxLEManager
         return true
     }
 
+    /**
+     * Returns platform GATT connection state for [d.device], or `-1` if [Manifest.permission.BLUETOOTH_CONNECT] is missing.
+     *
+     * @see [BluetoothProfile.getConnectionState]
+     */
     @Suppress("unused")
     fun getConnectionState(d: BlueNoxDevice): Int {
         if (d == null) return 0
@@ -1457,6 +1518,7 @@ public class BluenoxLEManager
         return -1
     }
 
+    /** True when [getConnectionState] is [BluetoothProfile.STATE_CONNECTED]. */
     @Suppress("unused")
     fun isDeviceConnected(d: BlueNoxDevice): Boolean {
         if (d == null) return false
@@ -1469,6 +1531,7 @@ public class BluenoxLEManager
         return false
     }
 
+    /** True when connection state is [BluetoothProfile.STATE_CONNECTED] or [BluetoothProfile.STATE_CONNECTING]. */
     @Suppress("unused")
     fun isDeviceConnectedOrAttempting(d: BlueNoxDevice): Boolean {
         if (d == null) return false
@@ -1481,6 +1544,7 @@ public class BluenoxLEManager
         return false
     }
 
+    /** True when connection state is [BluetoothProfile.STATE_DISCONNECTED]. */
     @Suppress("unused")
     fun isDeviceDisconnected(d: BlueNoxDevice): Boolean {
         if (d == null) return false
@@ -1493,6 +1557,14 @@ public class BluenoxLEManager
         return false
     }
 
+    /**
+     * Whether a Bluetooth-related runtime permission is granted for the manager [Context].
+     *
+     * On API below 31, [Manifest.permission.BLUETOOTH_SCAN], [Manifest.permission.BLUETOOTH_CONNECT],
+     * and [Manifest.permission.BLUETOOTH_ADVERTISE] are checked via [Manifest.permission.BLUETOOTH].
+     *
+     * @param perm One of [Manifest.permission] strings used by this library.
+     */
     public fun checkRequiredPermission(perm: String) : Boolean
     {
         val permissionToCheck = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
@@ -1554,10 +1626,8 @@ public class BluenoxLEManager
         if (mProximityEngine != null && mProximityEngine.running()) mProximityEngine.updateRSSI(device, rssi)
     }
 
-    // Create a BroadcastReceiver for Bluetooth Classic and other Actions
     /**
-     * BroadcastReceiver for Bluetooth Classic and other Actions
-     *
+     * BroadcastReceiver for Bluetooth adapter state, bond changes, and related intents; refreshes readiness where applicable.
      */
     @SuppressLint("MissingPermission")
     private val BlueNoxDeviceReceiver = object : BroadcastReceiver() {
@@ -1677,11 +1747,9 @@ public class BluenoxLEManager
 
 
     /**
-     * Uninitializes the BlueNox Classic Manager
+     * Tears down scanning, timers, broadcast receiver, and marks the manager uninitialized.
      *
-     * This functions must be called once the application is being killed and the manager
-     * is no longer needed
-     *
+     * Call from application shutdown or when BLE is no longer needed to avoid receiver leaks.
      */
     fun uninitialize()
     {
@@ -1821,6 +1889,9 @@ public class BluenoxLEManager
 
         private val bluenoxThreadQueue: ArrayBlockingQueue<BluenoxEventInfo> = ArrayBlockingQueue(10, true)
 
+        /**
+         * Returns the process-wide [BluenoxLEManager] singleton, creating it on first use.
+         */
         fun getInstance() =
             instance ?: synchronized(this) {
                 instance ?: BluenoxLEManager().also { instance = it }

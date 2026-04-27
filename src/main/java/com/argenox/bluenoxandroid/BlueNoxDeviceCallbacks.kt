@@ -28,58 +28,90 @@ import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.le.ScanRecord
 
+/**
+ * Application callbacks for GATT, bonding, and peripheral events delivered by [BlueNoxDevice].
+ *
+ * Subclass [NullBlueNoxDeviceCallbacks] to override only the methods you need.
+ */
 interface BlueNoxDeviceCallbacks {
+    /** Bond lifecycle states surfaced by [BlueNoxDevice] and pairing broadcasts. */
     enum class BlueNoxBondState {
+        /** Android reports [BluetoothDevice.BOND_BONDING]. */
         BONDING,
+        /** Bond completed successfully. */
         BONDED,
+        /** Bond removed or not bonded. */
         UNBONDED,
+        /** Library is retrying bond per [BlueNoxBondingPolicy]. */
         RETRYING,
+        /** Bond attempt failed after retries or timeout. */
         FAILED,
+        /** Passkey/PIN entry may be required; see [BlueNoxDevice.setBondPinProvider]. */
         PIN_REQUESTED,
     }
 
+    /** Structured reasons passed to [uiOperationFailure] for app-level handling. */
     enum class BlueNoxFailureReason {
+        /** Missing Bluetooth runtime permission. */
         PERMISSION_DENIED,
+        /** Invalid argument to a device API (UUID, MTU range, etc.). */
         INVALID_ARGUMENT,
+        /** Requested API not supported on this OS level. */
         API_NOT_SUPPORTED,
+        /** [BluetoothDevice.connectGatt] returned null. */
         CONNECT_GATT_RETURNED_NULL,
+        /** Reconnect attempts exceeded [BlueNoxConnectionPolicy]. */
         CONNECT_RETRY_EXHAUSTED,
+        /** [BluetoothDevice.createBond] returned false. */
         BOND_REQUEST_REJECTED,
+        /** Bond retries exhausted per [BlueNoxBondingPolicy]. */
         BOND_RETRY_EXHAUSTED,
+        /** Bond did not complete within [BlueNoxBondingPolicy.timeoutMs]. */
         BOND_TIMEOUT,
+        /** Bond or pairing failed in a generic way. */
         BOND_FAILED,
+        /** GATT operation could not be queued or started. */
         OPERATION_START_FAILED,
+        /** Queued operation timed out waiting for completion. */
         OPERATION_TIMEOUT,
+        /** [BlueNoxDevice.refreshGattCache] failed. */
         CACHE_REFRESH_FAILED,
     }
 
+    /** @param state Platform Bluetooth adapter state constant from [BluetoothAdapter]. */
     @Suppress("unused")
     fun uiBluetoothStateChanged(state: Int)
 
+    /** Invoked when a manager-level scan stops (see [BluenoxLEManager.stopScanning]). */
     @Suppress("unused")
     fun uiBluetoothScanStopped()
 
+    /** @param device Peripheral from scan; @param rssi Last RSSI; @param record Parsed advertisement if present. */
     @Suppress("unused")
     fun uiDeviceFound(device: BluetoothDevice?, rssi: Int, record: ScanRecord?)
 
+    /** GATT connection established; service discovery may still be in progress. */
     @Suppress("unused")
     fun uiDeviceConnected(
         gatt: BluetoothGatt?,
         device: BluetoothDevice?
     )
 
+    /** GATT is connected and service discovery completed successfully. */
     @Suppress("unused")
     fun uiDeviceReady(
         gatt: BluetoothGatt?,
         device: BluetoothDevice?
     )
 
+    /** GATT link dropped or [BlueNoxDevice.disconnect] completed. */
     @Suppress("unused")
     fun uiDeviceDisconnected(
         gatt: BluetoothGatt?,
         device: BluetoothDevice?
     )
 
+    /** @param services Discovered GATT services after [BluetoothGatt.discoverServices]. */
     @Suppress("unused")
     fun uiAvailableServices(
         gatt: BluetoothGatt?,
@@ -87,6 +119,7 @@ interface BlueNoxDeviceCallbacks {
         services: List<BluetoothGattService?>?
     )
 
+    /** Characteristics discovered under a single service (legacy path). */
     @Suppress("unused")
     fun uiCharacteristicForService(
         gatt: BluetoothGatt?,
@@ -95,6 +128,7 @@ interface BlueNoxDeviceCallbacks {
         chars: List<BluetoothGattCharacteristic?>?
     )
 
+    /** Detailed metadata for a characteristic (legacy path). */
     @Suppress("unused")
     fun uiCharacteristicsDetails(
         gatt: BluetoothGatt?,
@@ -103,6 +137,7 @@ interface BlueNoxDeviceCallbacks {
         characteristic: BluetoothGattCharacteristic?
     )
 
+    /** Parsed presentation of a characteristic value (legacy path). */
     @Suppress("unused")
     fun uiNewValueForCharacteristic(
         gatt: BluetoothGatt?,
@@ -115,6 +150,7 @@ interface BlueNoxDeviceCallbacks {
         timestamp: String?
     )
 
+    /** Legacy notification callback; prefer [uiCharacteristicUpdated] for new code. */
     @Suppress("unused")
     fun uiGotNotification(
         gatt: BluetoothGatt?,
@@ -122,6 +158,7 @@ interface BlueNoxDeviceCallbacks {
         characteristic: BluetoothGattCharacteristic?
     )
 
+    /** Notify/indicate payload or other characteristic value updates delivered as raw bytes. */
     @Suppress("unused")
     fun uiCharacteristicUpdated(
         gatt: BluetoothGatt?,
@@ -130,6 +167,7 @@ interface BlueNoxDeviceCallbacks {
         value : ByteArray
     )
 
+    /** Successful characteristic write completed on the connection. */
     @Suppress("unused")
     fun uiSuccessfulWrite(
         gatt: BluetoothGatt?,
@@ -139,6 +177,7 @@ interface BlueNoxDeviceCallbacks {
         description: String?
     )
 
+    /** Characteristic write failed at the GATT layer. */
     @Suppress("unused")
     fun uiFailedWrite(
         gatt: BluetoothGatt?,
@@ -148,6 +187,7 @@ interface BlueNoxDeviceCallbacks {
         description: String?
     )
 
+    /** Read completed; value is on [BluetoothGattCharacteristic.getValue] until API changes. */
     @Suppress("unused")
     fun uiCharacteristicRead(
         gatt: BluetoothGatt?,
@@ -156,6 +196,7 @@ interface BlueNoxDeviceCallbacks {
     )
 
 
+    /** Descriptor write completed; @param status [BluetoothGatt] GATT status code. */
     @Suppress("unused")
     fun uiDescriptorWritten(
         gatt: BluetoothGatt?,
@@ -163,6 +204,11 @@ interface BlueNoxDeviceCallbacks {
         status: Int
     )
 
+    /**
+     * Descriptor read completed.
+     *
+     * @param value Descriptor bytes on success; may be null or empty on failure.
+     */
     @Suppress("unused")
     fun uiDescriptorRead(
         gatt: BluetoothGatt?,
@@ -172,18 +218,21 @@ interface BlueNoxDeviceCallbacks {
     ) {
     }
 
+    /** Result of enabling/disabling notify or indicate via CCCD write. */
     @Suppress("unused")
     fun uiCccdConfigured(
         device: BlueNoxDevice?,
         result: BlueNoxCccdConfigurationResult,
     )
 
+    /** Negotiated ATT MTU after [BlueNoxDevice.requestMtu]. */
     @Suppress("unused")
     fun uiMtuUpdated(
         gatt: BluetoothGatt?,
         mtu: Int
     )
 
+    /** Connection interval/latency/timeout update from [BluetoothGattCallback.onConnectionUpdated]. */
     @Suppress("unused")
     fun uiConnectionUpdated(
         gatt: BluetoothGatt?,
@@ -193,15 +242,18 @@ interface BlueNoxDeviceCallbacks {
         status: Int,
     )
 
+    /** Remote service database changed; app may need to rediscover services. */
     @Suppress("unused")
     fun uiServicesChanged(
         gatt: BluetoothGatt?,
         device: BluetoothDevice?,
     )
 
+    /** Simplified bond boolean (bonded vs not). Prefer [uiBondStateEvent] for detail. */
     @Suppress("unused")
     fun uiBondingChanged(device: BlueNoxDevice?, bondState: Boolean)
 
+    /** Fine-grained bond state machine updates from the library or platform. */
     @Suppress("unused")
     fun uiBondStateEvent(
         device: BlueNoxDevice?,
@@ -209,12 +261,19 @@ interface BlueNoxDeviceCallbacks {
         detail: String,
     )
 
+    /** RSSI read completed via [BlueNoxDevice.readRssi] or periodic updates when enabled. */
     @Suppress("unused")
     fun uiNewRssiAvailable(gatt: BluetoothGatt?, device: BluetoothDevice?, rssi: Int)
 
+    /** Optional scan/ranking hook when strongest signal device is tracked. */
     @Suppress("unused")
     fun uiNewMaxRssiDeviceFound(device: BluetoothDevice?, rssi: Int)
 
+    /**
+     * Structured failure for connect, bond, or GATT operations.
+     *
+     * @param characteristicUuid Related characteristic when applicable.
+     */
     @Suppress("unused")
     fun uiOperationFailure(
         device: BluetoothDevice?,
@@ -223,7 +282,9 @@ interface BlueNoxDeviceCallbacks {
         characteristicUuid: String?,
     )
 
-    /* define Null Adapter class for that interface */
+    /**
+     * No-op default implementation of [BlueNoxDeviceCallbacks] for selective overrides.
+     */
     open class NullBlueNoxDeviceCallbacks : BlueNoxDeviceCallbacks {
         override fun uiBluetoothStateChanged(state: Int) {}
 

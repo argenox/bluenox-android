@@ -49,27 +49,44 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import kotlin.toString
 
+/**
+ * Represents one BLE peripheral: GATT connection, reads/writes, notifications, bonding, and an internal operation queue.
+ *
+ * Instances are created by [BlueNoxDeviceStore] during scan; connect with [connect]. Register
+ * [BlueNoxDeviceCallbacks] or [BlueNoxDeviceFlowAdapter] before or when connecting. Most GATT
+ * calls require an active connection and [Manifest.permission.BLUETOOTH_CONNECT] on API 31+.
+ */
 class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListener, Serializable {
 
     private val MODULE_TAG : String = "BlueNoxDevice"
 
     private val dbgObj = BlueNoxDebug(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_ERROR)
 
+    /** Unique id for this in-memory device wrapper (not the Bluetooth address). */
     val id: UUID = UUID.randomUUID()
+    /** App-side timestamp associated with this device record. */
     var date: Date = Date()
+    /** Platform [BluetoothDevice]; null until set by scan or construction. */
     var device: BluetoothDevice? = null
 
+    /** Last observed RSSI from scan or remote read. */
     @get:Suppress("unused")
     var rssi: Int = 0
 
+    /** Latest LE scan record when populated by the scanner. */
     @get:Suppress("unused")
     var scanRecord: ScanRecord? = null
+    /** Primary advertising PHY from the last scan callback. */
     var primaryPhy: Int = 0
+    /** Secondary advertising PHY from the last scan callback. */
     var secondaryPhy: Int = 0
+    /** Active GATT client after [connect]; cleared on disconnect. */
     var mBluetoothGatt: BluetoothGatt? = null
     private var mServices: List<BluetoothGattService>? = null
 
+    /** True while a connect or reconnect attempt is in flight. */
     var mCurrentlyConnecting: Boolean = false
+    /** Set by [disconnect] so [uiDeviceDisconnected] can distinguish user vs accidental disconnect. */
     var mDisconnectRequested: Boolean = false
 
     private val _mutex: Lock = ReentrantLock(true)
@@ -77,10 +94,14 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
 
     private var mConnectionTimestamp: Long = 0
 
+    /** When true, RSSI polling may repeat on [mTimerHandler]. */
     var mRssiTimerRepeat: Boolean = false
+    /** Master switch for periodic RSSI reads. */
     var mRssiTimerEnabled: Boolean = false
+    /** Legacy flag; connection state is tracked via GATT and [isConnected]. */
     val mConnected: Boolean = false
 
+    /** Optional handler used for RSSI or other timers. */
     var mTimerHandler: Handler? = null
 
 
@@ -114,6 +135,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
 
     private lateinit var mOperationQueue: BlueNoxOpQueue
 
+    /** Incremented when service/characteristic discovery completes (diagnostics). */
     var serviceCharDiscoveryCount: Int = 0
 
     private val deviceCallbacksArrayList: HashSet<BlueNoxDeviceCallbacks?>? =
@@ -138,9 +160,9 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
     private var batteryLvl: String? = null
 
     /**
-     * \brief Initiates Bluetooth pairing and bonding
+     * Starts Android bonding for this peripheral when already GATT-connected.
      *
-     *
+     * @return false if not connected, permission denied, or [BluetoothDevice.createBond] failed.
      */
     fun pairAndBond(): Boolean {
         val target = device ?: return false
@@ -193,30 +215,41 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         return true
     }
 
+    /** Replaces reconnect backoff policy with explicit [BlueNoxConnectionPolicy] values. */
     fun setConnectionPolicy(policy: BlueNoxConnectionPolicy) {
         connectionPolicy = policy
     }
 
+    /** Applies a named [BlueNoxConnectionProfile] preset (aggressive / balanced / battery saver). */
     fun setConnectionProfile(profile: BlueNoxConnectionProfile) {
         connectionPolicy = profile.toPolicy()
     }
 
+    /** Configures automatic bond retry and timeout behavior. */
     fun setBondingPolicy(policy: BlueNoxBondingPolicy) {
         bondingPolicy = policy
     }
 
+    /**
+     * Optional supplier for pairing PIN when [BlueNoxDeviceCallbacks.BlueNoxBondState.PIN_REQUESTED] occurs.
+     *
+     * Return null to decline automatic PIN entry.
+     */
     fun setBondPinProvider(provider: (() -> String?)?) {
         bondPinProvider = provider
     }
 
+    /** Updates chunking/retry behavior for [writeCharacteristicLongByUUID] and split writes. */
     fun setLongWriteStrategy(strategy: BlueNoxLongWriteStrategy) {
         longWriteStrategy = strategy
     }
 
+    /** Current [BlueNoxLongWriteStrategy] used for long and split writes. */
     fun getLongWriteStrategy(): BlueNoxLongWriteStrategy {
         return longWriteStrategy
     }
 
+    /** Supplies a trimmed PIN string during pairing, if [setBondPinProvider] is configured. */
     internal fun provideBondPin(): String? {
         val value = bondPinProvider?.invoke()?.trim()
         return value?.takeIf { it.isNotEmpty() }
@@ -315,10 +348,12 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         mMainCallback.uiBondStateEvent(this, state, detail)
     }
 
+    /** Marks this device as recently seen in advertising (used by [currentlyAdvertising]). */
     fun setLastAdvertisement() {
         mLastAdvertisement = Date()
     }
 
+    /** Forces [currentlyAdvertising] to false by backdating the last advertisement timestamp. */
     fun clearLastAdvertisement() {
         val calendar =
             Calendar.getInstance() // gets a calendar using the default time zone and locale.
@@ -327,12 +362,14 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         mLastAdvertisement = calendar.time
     }
 
+    /** True if the last advertisement timestamp is within the last few seconds. */
     fun currentlyAdvertising(): Boolean {
         val curTime = Date()
 
         return (curTime.time - mLastAdvertisement!!.time) < 7000
     }
 
+    /** Human-readable elapsed time since the last advertisement update. */
     val lastAdvertisement: String
         get() {
             val curTime = Date()
@@ -340,11 +377,18 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             return TimeHelper.getTimeString((curTime.time - mLastAdvertisement!!.time) / 1000, true)
         }
 
+    /**
+     * Constructs a device bound to a platform [BluetoothDevice] and app [Context] for GATT.
+     *
+     * @param device Remote device; typically from scan.
+     * @param ctx Context used for [BluetoothDevice.connectGatt].
+     */
     constructor(device: BluetoothDevice?, ctx: Context?) : this() {
         this.device = device
         mParent = ctx
     }
 
+    /** Records a single RSSI + scan record sample in the rolling advertisement history. */
     fun addAdvertisingEvent(r: Int, sr: ScanRecord?) {
         mAdvList.add(AdvertisementEvent(Date(), r, sr))
     }
@@ -358,11 +402,13 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
 
 
 
+    /** Allows automatic reconnect scheduling after unexpected GATT disconnects. */
     fun enableReconnection() {
         Log.d(MODULE_TAG, "Begin Connection")
         mAttemptConnection = true
     }
 
+    /** Stops automatic reconnect attempts and clears pending reconnect callbacks. */
     fun stopReconnection() {
         Log.d(MODULE_TAG, "Stop Reconnection")
         mAttemptConnection = false
@@ -373,6 +419,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
 
     private var mStartupComplete = false
 
+    /** Invoked by [BlueNoxOpQueue] when the startup read queue has drained; emits [BlueNoxDeviceCallbacks.uiDeviceReady]. */
     override fun queueCompleteCallback() {
         if (mStartupComplete) {
             _mutex.withLock {
@@ -388,6 +435,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         }
     }
 
+    /** Invoked by [BlueNoxOpQueue] when a queued operation fails to start or times out. */
     override fun queueOperationFailed(
         op: BlueNoxOp,
         reason: BlueNoxDeviceCallbacks.BlueNoxFailureReason,
@@ -539,7 +587,14 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         return true
     }
 
-
+    /**
+     * Opens a GATT connection to [device] and registers an optional callback.
+     *
+     * Enables reconnection with backoff per [setConnectionPolicy]. Service discovery runs
+     * automatically after connect in [BluenoxGATTCallback].
+     *
+     * @param callback Optional listener added via [addListener] before connect starts.
+     */
     fun connect(callback: BlueNoxDeviceCallbacks?) {
         Log.v(MODULE_TAG, "Connecting to device with address: " + mACAddress)
 
@@ -565,6 +620,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         //startConnectionTimer();
     }
 
+    /** Calls [BluetoothDevice.connectGatt] with [mbleConnCallback]; reports failures via [reportOperationFailure]. */
     private fun attemptGattConnection(): Boolean {
         if (!BluenoxLEManager.getInstance().checkRequiredPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
             reportOperationFailure(
@@ -599,6 +655,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         return true
     }
 
+    /** Schedules the next GATT connect retry with exponential backoff per [connectionPolicy]. */
     private fun scheduleReconnectAttempt(trigger: String) {
         if (!mAttemptConnection) {
             return
@@ -707,8 +764,10 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         )
     }
 
+    /** Requests ATT MTU negotiation; result delivered via [BlueNoxDeviceCallbacks.uiMtuUpdated]. */
     fun requestMtu(mtu: Int): Boolean = requestMtuResult(mtu).success
 
+    /** Same as [requestMtu] but returns structured [BlueNoxGattOperationResult]. */
     fun requestMtuResult(mtu: Int): BlueNoxGattOperationResult {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
             val detail = "requestMtu is not supported on API < 21"
@@ -743,8 +802,10 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         return operationSuccess(operation = "request-mtu", detail = "Requested MTU $mtu")
     }
 
+    /** Requests connection interval/latency priority (balanced / high / low power). */
     fun requestConnectionPriority(priority: Int): Boolean = requestConnectionPriorityResult(priority).success
 
+    /** Same as [requestConnectionPriority] with structured result. */
     fun requestConnectionPriorityResult(priority: Int): BlueNoxGattOperationResult {
         val allowed = setOf(
             BluetoothGatt.CONNECTION_PRIORITY_BALANCED,
@@ -775,8 +836,10 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         return operationSuccess(operation = "request-connection-priority", detail = "Requested connection priority $priority")
     }
 
+    /** Attempts hidden `BluetoothGatt.refresh()` to clear cached services (stack-dependent). */
     fun refreshGattCache(): Boolean = refreshGattCacheResult().success
 
+    /** Same as [refreshGattCache] with structured result and failure reasons. */
     fun refreshGattCacheResult(): BlueNoxGattOperationResult {
         val gatt = getConnectedGattOrReport("refreshGattCache")
             ?: return operationFailure(operation = "refresh-gatt-cache", detail = "GATT is not connected")
@@ -803,8 +866,10 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         return operationSuccess(operation = "refresh-gatt-cache", detail = "Refresh cache requested")
     }
 
+    /** Starts a remote RSSI read; value arrives on [BlueNoxDeviceCallbacks.uiNewRssiAvailable]. */
     fun readRssi(): Boolean = readRssiResult().success
 
+    /** Same as [readRssi] with structured result. */
     fun readRssiResult(): BlueNoxGattOperationResult {
         val gatt = getConnectedGattOrReport("readRssi")
             ?: return operationFailure(operation = "read-rssi", detail = "GATT is not connected")
@@ -843,6 +908,13 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         return characteristic.getDescriptor(descriptorUuid)
     }
 
+    /**
+     * Reads a GATT descriptor identified by UUIDs after services are discovered.
+     *
+     * @param serviceUuid Service UUID string.
+     * @param characteristicUuid Parent characteristic UUID string.
+     * @param descriptorUuid Descriptor UUID string.
+     */
     fun readDescriptorByUuid(
         serviceUuid: String,
         characteristicUuid: String,
@@ -851,6 +923,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         return readDescriptorByUuidResult(serviceUuid, characteristicUuid, descriptorUuid).success
     }
 
+    /** Same as [readDescriptorByUuid] with structured [BlueNoxGattOperationResult]. */
     @Suppress("DEPRECATION")
     fun readDescriptorByUuidResult(
         serviceUuid: String,
@@ -900,6 +973,11 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         )
     }
 
+    /**
+     * Writes payload bytes to a GATT descriptor (e.g. CCCD or vendor descriptor).
+     *
+     * @param data Descriptor value; must not be null.
+     */
     fun writeDescriptorByUuid(
         serviceUuid: String,
         characteristicUuid: String,
@@ -909,6 +987,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         return writeDescriptorByUuidResult(serviceUuid, characteristicUuid, descriptorUuid, data).success
     }
 
+    /** Same as [writeDescriptorByUuid] with structured result. */
     @Suppress("DEPRECATION")
     fun writeDescriptorByUuidResult(
         serviceUuid: String,
@@ -977,23 +1056,19 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         )
     }
 
+    /** Internal fan-out callback that dispatches to all registered [BlueNoxDeviceCallbacks]. */
     fun getMainCallback() : BlueNoxDeviceCallbacks
     {
         return mMainCallback
     }
 
 
-    /* This callback calls the actual callbacks which can be mulitple as each interface may
-       register one.
+    /**
+     * Bridges [BluenoxGATTCallback] into every registered [BlueNoxDeviceCallbacks]; also drives
+     * [mOperationQueue] completion and standard characteristic property updates.
      */
     private val mMainCallback: BlueNoxDeviceCallbacks = object : BlueNoxDeviceCallbacks.NullBlueNoxDeviceCallbacks() {
-        /**
-         * \brief Callback indicating Bluetooth Scanning has stopped
-         *
-         *
-         * \return none
-         *
-         */
+        /** Forwards global scan-stopped events to all listeners. */
         override fun uiBluetoothScanStopped() {
             super.uiBluetoothScanStopped()
 
@@ -1012,14 +1087,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             _mutex.unlock()
         }
 
-        /**
-         * \brief Callback function indicating AO Module has connected
-         *
-         *
-         * \param gatt is the gatt object of the device
-         * \param device is the Bluetooth Device
-         *
-         */
+        /** Binds the operation queue to GATT, resets reconnect state, and notifies listeners. */
         override fun uiDeviceConnected(gatt: BluetoothGatt?, device: BluetoothDevice?) {
             super.uiDeviceConnected(gatt, device)
 
@@ -1046,6 +1114,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         }
 
 
+        /** Clears queue, closes GATT, notifies listeners, or schedules reconnect on transient failure. */
         override fun uiDeviceDisconnected(gatt: BluetoothGatt?, device: BluetoothDevice?) {
             Log.d(MODULE_TAG, "uiDeviceDisconnected")
 
@@ -1090,6 +1159,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             }
         }
 
+        /** Caches discovered services, logs the tree, queues initial reads, and refreshes characteristics. */
         override fun uiAvailableServices(
             gatt: BluetoothGatt?,
             device: BluetoothDevice?,
@@ -1110,6 +1180,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         }
 
 
+        /** Debug log of services, characteristics (with property flags), and descriptors. */
         fun printServiceTree() {
             for (serv in mServices!!) {
                 Log.d(MODULE_TAG, "Service: " + serv.uuid.toString())
@@ -1125,6 +1196,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             }
         }
         
+        /** Human-readable GATT property bitmask for logging. */
         private fun getCharacteristicPropertiesString(properties: Int): String {
             val props = mutableListOf<String>()
             
@@ -1153,6 +1225,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             return if (props.isEmpty()) "NONE" else props.joinToString(" | ")
         }
 
+        /** Decodes characteristic bytes as UTF-8 text when possible. */
         private fun getCharacteristicValueString(data: ByteArray?): String? {
             val str: String
 
@@ -1170,6 +1243,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         }
 
 
+        /** Enqueues a [BlueNoxOp] read for every readable characteristic after discovery. */
         fun updateAllCharacteristics(gatt: BluetoothGatt?, services: List<BluetoothGattService>) {
             for (serv in services) {
                 for (characteristic in serv.characteristics) {
@@ -1194,6 +1268,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         }
 
 
+        /** Updates cached DIS/battery fields and property callbacks; otherwise delegates to [characteristicNotification]. */
         private fun refreshUpdatedCharacteristic(characteristic: BluetoothGattCharacteristic): Boolean {
             val data = characteristicValueOrNull(characteristic) ?: return false
 
@@ -1295,6 +1370,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             return characteristicNotification(characteristic)
         }
 
+        /** Unused helper to refresh standard characteristics from an in-memory service list. */
         @Suppress("unused")
         private fun refreshUpdatedServices(services: List<BluetoothGattService>) {
             for (serv in services) {
@@ -1320,7 +1396,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             }
         }
 
-        /* get all characteristic for particular service and pass them to the UI callback */
+        /** Legacy stub; resolves characteristics for [service] when [gatt] is non-null. */
         fun getCharacteristicsForService(service: BluetoothGattService?, gatt: BluetoothGatt?) {
             if (service == null) {
                 return
@@ -1336,6 +1412,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             }
         }
 
+        /** Forwards per-service characteristic lists to registered listeners. */
         override fun uiCharacteristicForService(
             gatt: BluetoothGatt?,
             device: BluetoothDevice?,
@@ -1361,17 +1438,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             }*/
         }
 
-        /**
-         * \brief Callback function indicating successful BLE Write
-         *
-         *
-         * \param gatt is the gatt object of the device
-         * \param device is the Bluetooth Device
-         * \param service is the BLE service
-         * \param ch is the characteristic written
-         * \param description is the description of the result
-         *
-         */
+        /** Notifies listeners and completes a queued write operation on [ch]. */
         override fun uiSuccessfulWrite(
             gatt: BluetoothGatt?,
             device: BluetoothDevice?,
@@ -1398,17 +1465,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             }
         }
 
-        /**
-         * \brief Callback function indicating failed BLE Write
-         *
-         *
-         * \param gatt is the gatt object of the device
-         * \param device is the Bluetooth Device
-         * \param service is the BLE service
-         * \param ch is the characteristic written
-         * \param description is the description of the result
-         *
-         */
+        /** Notifies listeners and signals write failure to the operation queue for [ch]. */
         override fun uiFailedWrite(
             gatt: BluetoothGatt?,
             device: BluetoothDevice?,
@@ -1434,15 +1491,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             }
         }
 
-        /**
-         * \brief Callback function indicating a new RSSI value is available
-         *
-         *
-         * \param gatt is the gatt object of the device
-         * \param device is the Bluetooth Device
-         * \param rssi is the RSSI value received for that device
-         *
-         */
+        /** Forwards remote RSSI reads to all listeners. */
         override fun uiNewRssiAvailable(gatt: BluetoothGatt?, device: BluetoothDevice?, rssi: Int) {
             super.uiNewRssiAvailable(gatt, device, rssi)
 
@@ -1462,16 +1511,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         }
 
 
-        /**
-         * \brief Callback function indicating BLE Notification received from Connector
-         *
-         *
-         * \param gatt is the gatt object of the device
-         * \param device is the Bluetooth Device
-         * \param characteristic is the characteristic written
-         *
-         *
-         */
+        /** Legacy notification path: forwards to listeners and completes notify ops on the queue. */
         override fun uiGotNotification(
             gatt: BluetoothGatt?,
             device: BluetoothDevice?,
@@ -1513,6 +1553,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         }
 
 
+        /** API 33+ value callback: updates standard characteristics, forwards [value], may complete queue ops. */
         override fun uiCharacteristicUpdated(
             gatt: BluetoothGatt?,
             device: BluetoothDevice?,
@@ -1550,6 +1591,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             }
         }
 
+        /** Dispatches read results, refreshes cached properties, and completes read queue ops. */
         override fun uiCharacteristicRead(
             gatt: BluetoothGatt?,
             device: BluetoothDevice?,
@@ -1576,6 +1618,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             }
         }
 
+        /** Forwards descriptor writes, emits CCCD confirmation when applicable, and advances the queue. */
         override fun uiDescriptorWritten(
             gatt: BluetoothGatt?,
             descriptor: BluetoothGattDescriptor?,
@@ -1632,6 +1675,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             }
         }
 
+        /** Forwards descriptor read results to listeners. */
         override fun uiDescriptorRead(
             gatt: BluetoothGatt?,
             descriptor: BluetoothGattDescriptor?,
@@ -1648,6 +1692,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             _mutex.unlock()
         }
 
+        /** Forwards simplified bonded / not bonded state. */
         override fun uiBondingChanged(device: BlueNoxDevice?, bondState: Boolean) {
             super.uiBondingChanged(device, bondState)
 
@@ -1663,6 +1708,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
 
         }
 
+        /** Forwards detailed bond state machine updates from the GATT layer. */
         override fun uiBondStateEvent(
             device: BlueNoxDevice?,
             state: BlueNoxDeviceCallbacks.BlueNoxBondState,
@@ -1678,6 +1724,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             _mutex.unlock()
         }
 
+        /** Forwards negotiated ATT MTU to listeners. */
         override fun uiMtuUpdated(gatt: BluetoothGatt?, mtu: Int) {
             super.uiMtuUpdated(gatt, mtu)
 
@@ -1692,6 +1739,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             _mutex.unlock()
         }
 
+        /** Forwards connection parameter update (interval, latency, supervision timeout). */
         override fun uiConnectionUpdated(
             gatt: BluetoothGatt?,
             interval: Int,
@@ -1709,6 +1757,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             _mutex.unlock()
         }
 
+        /** Indicates remote service database changed; does not auto-rediscover to avoid stack loops. */
         override fun uiServicesChanged(gatt: BluetoothGatt?, device: BluetoothDevice?) {
             super.uiServicesChanged(gatt, device)
             // Do not call discoverServices() here; this callback can be emitted as part of
@@ -1730,6 +1779,9 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         mDisconnectRequested = false
     }
 
+    /**
+     * Requests GATT disconnect if connected (legacy helper; [devAddr] is unused in current implementation).
+     */
     @Suppress("unused")
     fun disconnectDevice(devAddr: String?) {
 
@@ -1740,6 +1792,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         }
     }
 
+    /** Hook for subclasses when a non-standard characteristic updates; default returns false. */
     protected fun characteristicNotification(characteristic: BluetoothGattCharacteristic?): Boolean {
 
         dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_DEBUG, MODULE_TAG,"updateCharacteristics")
@@ -1747,10 +1800,14 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         return false
     }
 
+    /** Called after service discovery; override to refresh app-specific characteristic state. */
     protected fun updateCharacteristics() {
         //Log.d(MODULE_TAG, "updateCharacteristics");
     }
 
+    /**
+     * User-requested disconnect: stops reconnection, clears the operation queue, and closes GATT when the stack delivers disconnect.
+     */
     fun disconnect() {
         Log.d(MODULE_TAG, "Requesting Disconnection")
         mDisconnectRequested = true
@@ -1767,6 +1824,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         mOperationQueue.clearQueue()
     }
 
+    /** Returns cumulative counters for reconnect, bond, and operation-timeout diagnostics. */
     fun sessionDiagnostics(): BlueNoxSessionDiagnostics {
         return BlueNoxSessionDiagnostics(
             reconnectAttempts = reconnectAttemptsTotal,
@@ -1778,14 +1836,17 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         )
     }
 
+    /** Whether automatic reconnection is currently enabled ([enableReconnection]). */
     fun attemptConnection(): Boolean {
         return mAttemptConnection
     }
 
+    /** Seeds the internal connection-timeout counter used by legacy connection timers. */
     fun resetConnectionTimeoutCount(cnt: Int) {
         connectionTimeoutCount = cnt
     }
 
+    /** Optional alternate GATT callback reference (most flows use [mbleConnCallback]). */
     @get:Suppress("unused")
     var callback: BluenoxGATTCallback?
         get() = mCallback
@@ -1793,11 +1854,13 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             mCallback = cback
         }
 
+    /** Decrements the internal connection-timeout counter by [cnt], floored at zero. */
     fun reduceConnectionTimeoutCount(cnt: Int) {
         if (connectionTimeoutCount - cnt >= 0) connectionTimeoutCount -= cnt
         else connectionTimeoutCount = 0
     }
 
+    /** True when the legacy connection-timeout counter has reached zero. */
     fun ConnectionTimeoutExpired(): Boolean {
         return connectionTimeoutCount == 0
     }
@@ -1811,6 +1874,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
 //        return null
 //    }
 
+    /** Bluetooth address from [device], or empty string if device is null. */
     val mACAddress: String
         get() = if (device == null) {
             ""
@@ -1818,6 +1882,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             device!!.address
         }
 
+    /** Returns the peripheral friendly name when [Manifest.permission.BLUETOOTH_CONNECT] allows, or `"N/A"`. */
     fun getName(): String {
         if (device == null) {
             return "N/A"
@@ -1834,6 +1899,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         return "N/A"
     }
 
+    /** Returns the Bluetooth MAC address when permitted, or empty string / `"N/A"`. */
     fun getMacAddress(): String {
         if (device == null) {
             return ""
@@ -1851,6 +1917,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
     }
 
 
+    /** True when [mBluetoothGatt] exists and profile state is [BluetoothProfile.STATE_CONNECTED]. */
     @get:Suppress("unused")
     val isConnected: Boolean
         get() {
@@ -1863,12 +1930,14 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             }
         }
 
+    /** Platform GATT connection state for this device (see [BluetoothProfile]). */
     fun getConnectionState(): Int
     {
         return BluenoxLEManager.getInstance().getConnectionState(this)
     }
 
 
+    /** Queues a read of the standard firmware revision characteristic (API 31+). */
     @RequiresApi(Build.VERSION_CODES.S)
     protected fun fetchFirmwareVersion() {
         if (mBluetoothGatt != null) {
@@ -1879,6 +1948,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         }
     }
 
+    /** Seconds since [uiDeviceConnected] set [mConnectionTimestamp], or since epoch if unset. */
     val connectionTime: Long
         get() {
             val curTimestamp = System.currentTimeMillis() / 1000
@@ -1886,6 +1956,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
             return curTimestamp - mConnectionTimestamp
         }
 
+    /** Queues a read of the manufacturer name string (API 31+). */
     @RequiresApi(Build.VERSION_CODES.S)
     protected fun fetchManufacturer() {
         if (mBluetoothGatt != null) {
@@ -1896,6 +1967,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         }
     }
 
+    /** Queues a read of the serial number string (API 31+). */
     @RequiresApi(Build.VERSION_CODES.S)
     protected fun fetchSerialNumber() {
         if (mBluetoothGatt != null) {
@@ -1906,6 +1978,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         }
     }
 
+    /** Queues a read of the hardware revision string (API 31+). */
     @RequiresApi(Build.VERSION_CODES.S)
     protected fun fetchHardwareRevision() {
         if (mBluetoothGatt != null) {
@@ -1917,14 +1990,17 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         }
     }
 
+    /** True if [uuid] resolves to a characteristic in the cached service list. */
     protected fun characteristicExists(uuid: String?): Boolean {
         return getCharacteristicByUUID(UUID.fromString(uuid)) != null
     }
 
+    /** Looks up a characteristic by UUID string in discovered services. */
     protected fun getCharacteristicByUUID(uuid: String?): BluetoothGattCharacteristic? {
         return getCharacteristicByUUID(UUID.fromString(uuid))
     }
 
+    /** Looks up a characteristic by [u] in discovered services. */
     protected fun getCharacteristicByUUID(u: UUID): BluetoothGattCharacteristic? {
         if (mServices != null && mServices!!.size > 0) {
             for (serv in mServices!!) {
@@ -1939,6 +2015,7 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         return null
     }
 
+    /** Enqueues [op] on [mOperationQueue] when non-null. */
     protected fun addQueueOperation(op: BlueNoxOp?) {
         if (op != null) {
             mOperationQueue.addOperation(op)
@@ -1947,33 +2024,39 @@ class BlueNoxDevice protected constructor() : BlueNoxOpQueue.BlueNoxQueueListene
         }
     }
 
+    /** Removes a not-yet-started queued operation by [BlueNoxOp.mOperationId]. */
     fun cancelQueuedOperation(operationId: String): Boolean {
         return mOperationQueue.cancelOperation(operationId)
     }
 
+    /** Cancels all queued operations targeting [uuid] that have not started yet; returns count removed. */
     fun cancelQueuedOperationsForCharacteristic(uuid: String): Int {
         val parsed = runCatching { UUID.fromString(uuid) }.getOrNull() ?: return 0
         return mOperationQueue.cancelOperationsForCharacteristic(parsed)
     }
 
+    /** Current depth of the internal [BlueNoxOpQueue]. */
     fun queuedOperationCount(): Int {
         return mOperationQueue.queueDepth()
     }
 
+    /** Alias for [stopReconnection]. */
     @Suppress("unused")
     fun disableReconnection() {
         stopReconnection()
     }
 
-    /* enables/disables notification for characteristic */
+    /** Enables or disables notifications (not indications) via CCCD for [uuid]. */
     fun setNotificationForCharacteristic(uuid: String, enabled: Boolean) {
         configureCccdByUuidResult(uuid = uuid, enabled = enabled, indicate = false)
     }
 
+    /** Enables/disables notify or indicate on the CCCD for [uuid] per [indicate] when [enabled] is true. */
     fun configureCccdByUuid(uuid: String, enabled: Boolean, indicate: Boolean): Boolean {
         return configureCccdByUuidResult(uuid = uuid, enabled = enabled, indicate = indicate).success
     }
 
+    /** Same as [configureCccdByUuid] with structured result and validation of characteristic properties. */
     fun configureCccdByUuidResult(uuid: String, enabled: Boolean, indicate: Boolean): BlueNoxGattOperationResult {
         val normalizedUuid = runCatching { UUID.fromString(uuid).toString() }.getOrElse {
             val detail = "Invalid characteristic UUID: $uuid"
