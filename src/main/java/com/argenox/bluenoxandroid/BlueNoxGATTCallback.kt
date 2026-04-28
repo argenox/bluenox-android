@@ -109,19 +109,16 @@ class BluenoxGATTCallback internal constructor(cb: BlueNoxDeviceCallbacks, name:
             .sendToTarget()
     }
 
+    @Deprecated(
+        message = "Android deprecated this callback overload; kept for backward compatibility on older API levels.",
+    )
     @Suppress("DEPRECATION")
     override fun onDescriptorRead(
         gatt: BluetoothGatt,
         descriptor: BluetoothGattDescriptor,
         status: Int
     ) {
-        super.onDescriptorRead(gatt, descriptor, status)
-        val data: BluetoothData = BluetoothData()
-        data.gatt = gatt
-        data.d = descriptor
-        data.status = status
-        data.value = descriptor.value ?: byteArrayOf()
-        bleHandler.obtainMessage(MSG_DESCRIPTOR_READ, data).sendToTarget()
+        handleDescriptorRead(gatt, descriptor, status, descriptor.value ?: byteArrayOf())
     }
 
     override fun onDescriptorRead(
@@ -130,13 +127,7 @@ class BluenoxGATTCallback internal constructor(cb: BlueNoxDeviceCallbacks, name:
         status: Int,
         value: ByteArray
     ) {
-        super.onDescriptorRead(gatt, descriptor, status, value)
-        val data: BluetoothData = BluetoothData()
-        data.gatt = gatt
-        data.d = descriptor
-        data.status = status
-        data.value = value
-        bleHandler.obtainMessage(MSG_DESCRIPTOR_READ, data).sendToTarget()
+        handleDescriptorRead(gatt, descriptor, status, value)
     }
 
     override fun onMtuChanged(gatt: BluetoothGatt?, mtu: Int, status: Int) {
@@ -151,24 +142,52 @@ class BluenoxGATTCallback internal constructor(cb: BlueNoxDeviceCallbacks, name:
             .sendToTarget()
     }
 
+    @Deprecated(
+        message = "Android deprecated this callback overload; kept for backward compatibility on older API levels.",
+    )
+    @Suppress("DEPRECATION")
     override fun onCharacteristicRead(
         gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic,
         status: Int
     ) {
-        super.onCharacteristicRead(gatt, characteristic, status)
+        handleCharacteristicRead(gatt, characteristic, characteristic.value ?: byteArrayOf(), status)
+    }
 
+    override fun onCharacteristicRead(
+        gatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic,
+        value: ByteArray,
+        status: Int,
+    ) {
+        handleCharacteristicRead(gatt, characteristic, value, status)
+    }
 
+    private fun handleDescriptorRead(
+        gatt: BluetoothGatt,
+        descriptor: BluetoothGattDescriptor,
+        status: Int,
+        value: ByteArray,
+    ) {
+        val data: BluetoothData = BluetoothData()
+        data.gatt = gatt
+        data.d = descriptor
+        data.status = status
+        data.value = value
+        bleHandler.obtainMessage(MSG_DESCRIPTOR_READ, data).sendToTarget()
+    }
+
+    private fun handleCharacteristicRead(
+        gatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic,
+        value: ByteArray,
+        status: Int,
+    ) {
         if (status == BluetoothGatt.GATT_SUCCESS) {
-            // now, when services discovery is finished, we can call getServices() for Gatt
-            //getSupportedServices(gatt);
-
             val data: BluetoothData = BluetoothData()
             data.gatt = gatt
             data.c = characteristic
-            data.value = characteristic.value
-
-            bleHandler.obtainMessage(MSG_CHAR_READ, data)
-                .sendToTarget()
+            data.value = value
+            bleHandler.obtainMessage(MSG_CHAR_READ, data).sendToTarget()
         }
     }
 

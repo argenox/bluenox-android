@@ -24,6 +24,8 @@ import android.Manifest
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
+import android.bluetooth.BluetoothStatusCodes
+import android.os.Build
 import android.util.Log
 import com.argenox.bluenoxandroid.BlueNoxDebug
 import com.argenox.bluenoxandroid.BluenoxLEManager
@@ -95,16 +97,6 @@ internal class BlueNoxOpQueue
             return
         }
 
-        if (op.mOperationType == null) {
-            Log.e(MODULE_TAG, "Operation Type is invalid")
-            return
-        }
-
-        if (op.mTermCondition == null) {
-            Log.e(MODULE_TAG, "Operation Termination condition is invalid")
-            return
-        }
-
         val cnt = mOperationQueue.size
 
 
@@ -166,8 +158,7 @@ internal class BlueNoxOpQueue
                     }
                 } else if (curOp.mOperationType == com.argenox.bluenoxandroid.BlueNoxOp.OpType.Write && !curOp.mStarted) {
                     // TODO: Review Write Type
-                    curOp.mCharacteristic.setValue(curOp.mWriteData)
-                    curOp.mCharacteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+                    val writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
 
                     val sb = StringBuilder()
                     for (b in curOp.mWriteData) {
@@ -177,7 +168,7 @@ internal class BlueNoxOpQueue
                     dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_DEBUG,MODULE_TAG, "Writing to Gatt from Queue " + curOp.mCharacteristic.getUuid()
                         .toString() + "   " + sb.toString())
 
-                    if (!mBluetoothGatt!!.writeCharacteristic(curOp.mCharacteristic)) {
+                    if (!writeCharacteristicInternal(curOp.mCharacteristic, curOp.mWriteData, writeType)) {
                         Log.e(
                             MODULE_TAG,
                             "Queue Write " + curOp.mCharacteristic.getUuid().toString() + " failed"
@@ -196,9 +187,8 @@ internal class BlueNoxOpQueue
 
 
                     // TODO: Review Write Type
-                    curOp.mCharacteristic.setValue(curOp.mWriteData)
-                    curOp.mCharacteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
-                    if (!mBluetoothGatt!!.writeCharacteristic(curOp.mCharacteristic)) {
+                    val writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                    if (!writeCharacteristicInternal(curOp.mCharacteristic, curOp.mWriteData, writeType)) {
                         Log.e(
                             MODULE_TAG,
                             "Queue Write NRSP " + curOp.mCharacteristic.getUuid()
@@ -417,17 +407,21 @@ internal class BlueNoxOpQueue
 
         if (descriptor != null) {
             debugPrint("Setting Notification")
-
-            if (enabled) {
-                descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+            val descriptorValue = if (enabled) {
                 debugPrint("Enabling Notification ----")
+                BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
             } else {
-                descriptor.setValue(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE)
                 debugPrint("Disabling Notification ----")
+                BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
             }
+
             if(BluenoxLEManager.getInstance().checkRequiredPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
-                mBluetoothGatt!!.writeDescriptor(descriptor)
-                debugPrint("Notification Written ----")
+                if (writeDescriptorInternal(descriptor, descriptorValue)) {
+                    debugPrint("Notification Written ----")
+                } else {
+                    debugPrint("Notification Write failed ----")
+                    return false
+                }
             }
 
             rc = true
@@ -437,5 +431,43 @@ internal class BlueNoxOpQueue
         }
 
         return rc
+    }
+
+    private fun writeCharacteristicInternal(
+        characteristic: BluetoothGattCharacteristic,
+        value: ByteArray,
+        writeType: Int,
+    ): Boolean {
+        val gatt = mBluetoothGatt ?: return false
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val status = gatt.writeCharacteristic(characteristic, value, writeType)
+            status == BluetoothStatusCodes.SUCCESS ||
+                status == BluetoothStatusCodes.ERROR_GATT_WRITE_REQUEST_BUSY
+        } else {
+            @Suppress("DEPRECATION")
+            run {
+                characteristic.value = value
+                characteristic.writeType = writeType
+                gatt.writeCharacteristic(characteristic)
+            }
+        }
+    }
+
+    private fun writeDescriptorInternal(
+        descriptor: BluetoothGattDescriptor,
+        value: ByteArray,
+    ): Boolean {
+        val gatt = mBluetoothGatt ?: return false
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val status = gatt.writeDescriptor(descriptor, value)
+            status == BluetoothStatusCodes.SUCCESS ||
+                status == BluetoothStatusCodes.ERROR_GATT_WRITE_REQUEST_BUSY
+        } else {
+            @Suppress("DEPRECATION")
+            run {
+                descriptor.value = value
+                gatt.writeDescriptor(descriptor)
+            }
+        }
     }
 }

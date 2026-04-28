@@ -157,7 +157,9 @@ internal class BlueNoxDeviceStore
         }
 
         try {
-            bledev = c.newInstance() as BlueNoxDevice
+            val ctor = c.getDeclaredConstructor()
+            ctor.isAccessible = true
+            bledev = ctor.newInstance() as BlueNoxDevice
         } catch (e: Exception) {
             e.printStackTrace()
         }

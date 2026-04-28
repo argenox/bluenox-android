@@ -41,6 +41,7 @@ import android.os.Build
 import android.os.CountDownTimer
 import android.os.Handler
 import android.os.Looper
+import android.os.Parcelable
 import android.provider.Settings
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -1068,12 +1069,24 @@ public class BluenoxLEManager
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             locationManager.isLocationEnabled
         } else {
-            val mode = Settings.Secure.getInt(
-                ctx.contentResolver,
-                Settings.Secure.LOCATION_MODE,
-                Settings.Secure.LOCATION_MODE_OFF,
-            )
-            mode != Settings.Secure.LOCATION_MODE_OFF
+            // LOCATION_MODE is deprecated; use provider enablement on older Android releases.
+            runCatching {
+                locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+                    locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+            }.getOrDefault(false)
+        }
+    }
+
+    private fun <T : Parcelable> intentParcelableExtra(
+        intent: Intent,
+        key: String,
+        clazz: Class<T>,
+    ): T? {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableExtra(key, clazz)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(key)
         }
     }
 
@@ -1415,8 +1428,6 @@ public class BluenoxLEManager
      */
     @Suppress("unused")
     fun getConnectionState(d: BlueNoxDevice): Int {
-        if (d == null) return 0
-
         if(checkRequiredPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
             return bluetoothManager.getConnectionState(d.device, BluetoothProfile.GATT)
         }
@@ -1427,8 +1438,6 @@ public class BluenoxLEManager
     /** True when [getConnectionState] is [BluetoothProfile.STATE_CONNECTED]. */
     @Suppress("unused")
     fun isDeviceConnected(d: BlueNoxDevice): Boolean {
-        if (d == null) return false
-
         if(checkRequiredPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
             val state = bluetoothManager.getConnectionState(d.device, BluetoothProfile.GATT)
             return state == BluetoothProfile.STATE_CONNECTED
@@ -1440,8 +1449,6 @@ public class BluenoxLEManager
     /** True when connection state is [BluetoothProfile.STATE_CONNECTED] or [BluetoothProfile.STATE_CONNECTING]. */
     @Suppress("unused")
     fun isDeviceConnectedOrAttempting(d: BlueNoxDevice): Boolean {
-        if (d == null) return false
-
         if(checkRequiredPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
             val state = bluetoothManager.getConnectionState(d.device, BluetoothProfile.GATT)
             return state == BluetoothProfile.STATE_CONNECTED || state == BluetoothProfile.STATE_CONNECTING
@@ -1453,8 +1460,6 @@ public class BluenoxLEManager
     /** True when connection state is [BluetoothProfile.STATE_DISCONNECTED]. */
     @Suppress("unused")
     fun isDeviceDisconnected(d: BlueNoxDevice): Boolean {
-        if (d == null) return false
-
         if(checkRequiredPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
             val state = bluetoothManager.getConnectionState(d.device, BluetoothProfile.GATT)
             return state == BluetoothProfile.STATE_DISCONNECTED
@@ -1540,8 +1545,7 @@ public class BluenoxLEManager
 
         override fun onReceive(context: Context, intent: Intent) {
             val action: String = intent.action.toString()
-            val device : BluetoothDevice? =
-                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+            val device = intentParcelableExtra(intent, BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
 
             if(device == null)
             {
@@ -1569,16 +1573,8 @@ public class BluenoxLEManager
                         "Bond State Changed Event")
 
                     val deviceBondStateChanged: BluetoothDevice?
-
-                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-                        /* API below 31  */
-                        deviceBondStateChanged =
-                            intent.getParcelableExtra<BluetoothDevice?>(BluetoothDevice.EXTRA_DEVICE)
-                    }
-                    else
-                    {
-                        deviceBondStateChanged = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-                    }
+                    deviceBondStateChanged =
+                        intentParcelableExtra(intent, BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
 
                     if (deviceBondStateChanged != null) {
                         val bondState =
@@ -1598,11 +1594,9 @@ public class BluenoxLEManager
                     }
                 }
                 BluetoothDevice.ACTION_PAIRING_REQUEST -> {
-                    val pairingDevice = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-                        intent.getParcelableExtra<BluetoothDevice?>(BluetoothDevice.EXTRA_DEVICE)
-                    } else {
-                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-                    } ?: return
+                    val pairingDevice =
+                        intentParcelableExtra(intent, BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+                            ?: return
                     val d = mBlueNoxDeviceStore?.getDeviceFromAddress(pairingDevice.address) ?: return
                     d.getMainCallback().uiBondStateEvent(
                         d,

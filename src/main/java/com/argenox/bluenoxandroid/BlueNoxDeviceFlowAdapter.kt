@@ -77,6 +77,11 @@ class BlueNoxDeviceFlowAdapter : BlueNoxDeviceCallbacks.NullBlueNoxDeviceCallbac
     )
     val events: SharedFlow<BlueNoxDeviceEvent> = _events.asSharedFlow()
 
+    @Suppress("DEPRECATION")
+    private fun readCharacteristicValue(characteristic: BluetoothGattCharacteristic): ByteArray {
+        return characteristic.value?.copyOf() ?: byteArrayOf()
+    }
+
     override fun uiDeviceConnected(gatt: BluetoothGatt?, device: BluetoothDevice?) {
         val address = device?.address ?: return
         _events.tryEmit(BlueNoxDeviceEvent.Connection(address = address, connected = true))
@@ -116,7 +121,7 @@ class BlueNoxDeviceFlowAdapter : BlueNoxDeviceCallbacks.NullBlueNoxDeviceCallbac
             BlueNoxDeviceEvent.CharacteristicValue(
                 address = address,
                 characteristicUuid = c.uuid.toString(),
-                value = c.value ?: byteArrayOf(),
+                value = readCharacteristicValue(c),
                 source = "read",
             ),
         )
