@@ -819,11 +819,12 @@ public class BluenoxLEManager
     /**
      * Prepares Bluetooth services, the device store, background thread, and broadcast receivers.
      *
-     * Call once per process (typically from `Application` or after permission grant). Requires
-     * all [requiredPermissions] to be granted first.
+     * Call once per process (typically from `Application` or after permission grant).
+     * Initialization now succeeds even when runtime permissions are not granted yet, so callers
+     * can initialize early and react to [readinessState]/[readinessStatus] updates.
      *
      * @param context Any [Context]; [Context.getApplicationContext] is used internally.
-     * @return true if initialization succeeded; false if permissions are missing or setup failed.
+     * @return true when core manager setup succeeded.
      */
     fun initialize(context: Context) : Boolean {
 
@@ -833,9 +834,6 @@ public class BluenoxLEManager
         initPermissions()
 
         val permissionsReady = validatePermissions()
-        if(!permissionsReady) {
-            return false
-        }
 
         bluetoothManager = context.getSystemService(BluetoothManager::class.java)
         bluetoothAdapter = bluetoothManager.adapter
@@ -873,6 +871,13 @@ public class BluenoxLEManager
 
         initComplete = true
         refreshReadinessState()
+        if (!permissionsReady) {
+            dbgObj.debugPrint(
+                BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_WARNING,
+                MODULE_TAG,
+                "Initialize completed with missing runtime permissions; BLE operations may be limited until grant.",
+            )
+        }
         return true;
     }
 
@@ -1034,9 +1039,14 @@ public class BluenoxLEManager
         }
         val hardwareCompatible = runCatching { checkHardwareCompatible(managerContext) }.getOrDefault(false)
         val bluetoothEnabled = runCatching { bluetoothAdapter.isEnabled }.getOrDefault(false)
-        val permissionsGranted = isScanRuntimePermissionGranted(deriveLocationFromScan = true) &&
+        val requiresLocationForScan = Build.VERSION.SDK_INT < Build.VERSION_CODES.S
+        val permissionsGranted = isScanRuntimePermissionGranted(deriveLocationFromScan = requiresLocationForScan) &&
             isConnectRuntimePermissionGranted()
-        val locationServicesEnabled = isLocationServicesEnabled(managerContext)
+        val locationServicesEnabled = if (requiresLocationForScan) {
+            isLocationServicesEnabled(managerContext)
+        } else {
+            true
+        }
         val ready = hardwareCompatible && bluetoothEnabled && permissionsGranted && locationServicesEnabled
         return BlueNoxManagerReadinessState(
             initialized = true,
@@ -1359,8 +1369,23 @@ public class BluenoxLEManager
 
         var curSettings = settings;
 
+        if (!initComplete) {
+            dbgObj.debugPrint(
+                BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_WARNING,
+                MODULE_TAG,
+                "Cannot start scan: manager is not initialized",
+            )
+            return false
+        }
+
         /* Guard against scanning if not enabled */
         if (!isBtEnabled()) {
+            dbgObj.debugPrint(
+                BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_WARNING,
+                MODULE_TAG,
+                "Cannot start scan: Bluetooth adapter is disabled",
+            )
+            refreshReadinessState()
             return false
         }
 
@@ -1398,23 +1423,47 @@ public class BluenoxLEManager
         }
 
         if (!checkRequiredPermission(Manifest.permission.BLUETOOTH_SCAN)) {
+            val missing = getMissingScanRuntimePermissions(deriveLocationFromScan = false).joinToString(",")
             dbgObj.debugPrint(
                 BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_WARNING,
                 MODULE_TAG,
-                "Cannot start scan: missing required scan permission",
+                "Cannot start scan: missing required scan permission(s): $missing",
             )
+            refreshReadinessState()
             return false
         }
 
         val scanner = runCatching { bluetoothLeScanner }
             .getOrElse {
-                val resolved = bluetoothAdapter.bluetoothLeScanner
-                bluetoothLeScanner = resolved
-                resolved
+                runCatching { bluetoothAdapter.bluetoothLeScanner }.getOrNull()
             }
+        if (scanner == null) {
+            dbgObj.debugPrint(
+                BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_WARNING,
+                MODULE_TAG,
+                "Cannot start scan: BluetoothLeScanner unavailable",
+            )
+            return false
+        }
 
-        scanner.startScan(filters, curSettings, leScanCallback)
+        val effectiveFilters = filters?.takeIf { it.isNotEmpty() }
+        val scanStarted = runCatching {
+            scanner.startScan(effectiveFilters, curSettings, leScanCallback)
+            true
+        }.getOrElse { ex ->
+            dbgObj.debugPrint(
+                BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_ERROR,
+                MODULE_TAG,
+                "Failed to start scan: $ex",
+            )
+            false
+        }
+        if (!scanStarted) {
+            return false
+        }
+        bluetoothLeScanner = scanner
         isScanning = true
+        queueEvent(BluenoxEvents.BLUENOX_EVT_SCAN_START, "", "")
 
 
 
@@ -1498,38 +1547,68 @@ public class BluenoxLEManager
         return false
     }
 
+    private fun handleScanResult(result: ScanResult) {
+        if (!shouldEmitScanResult(result)) {
+            return
+        }
+
+        val store = mBlueNoxDeviceStore ?: return
+        runCatching {
+            store.addDevice(
+                result.device,
+                mdeviceClass,
+                result.rssi,
+                result.scanRecord,
+            )
+
+            dbgObj.debugPrint(
+                BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_INFO,
+                MODULE_TAG,
+                "Device Found:    ${result.device.address}",
+            )
+
+            val d = store.getDeviceFromAddress(result.device.address)
+            if (d != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    d.primaryPhy = result.primaryPhy
+                    d.secondaryPhy = result.secondaryPhy
+                } else {
+                    d.primaryPhy = 0
+                    d.secondaryPhy = 0
+                }
+                queueEvent(BluenoxEvents.BLUENOX_EVT_DEVICE_FOUND, d.getName(), d.getMacAddress())
+            }
+        }.onFailure { ex ->
+            dbgObj.debugPrint(
+                BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_ERROR,
+                MODULE_TAG,
+                "Failed to process scan result: $ex",
+            )
+        }
+    }
+
     private val leScanCallback: ScanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             super.onScanResult(callbackType, result)
+            handleScanResult(result)
+        }
 
-            if (!shouldEmitScanResult(result)) {
-                return
+        override fun onBatchScanResults(results: MutableList<ScanResult>) {
+            super.onBatchScanResults(results)
+            for (result in results) {
+                handleScanResult(result)
             }
+        }
 
-            /* Add device to Device Store */
-            if(mBlueNoxDeviceStore != null)
-            {
-                mBlueNoxDeviceStore!!.addDevice(result.device,
-                                                mdeviceClass,
-                                                result.rssi,
-                                                result.scanRecord)
-
-                dbgObj.debugPrint(BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_INFO, MODULE_TAG,
-                    "Device Found:    " + result.device.address)
-
-                val d = mBlueNoxDeviceStore!!.getDeviceFromAddress(result.device.address)
-                if(d != null) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        d.primaryPhy = result.primaryPhy
-                        d.secondaryPhy = result.secondaryPhy
-                    } else {
-                        d.primaryPhy = 0
-                        d.secondaryPhy = 0
-                    }
-                    /* Send event indicating scan has stopped */
-                    queueEvent(BluenoxEvents.BLUENOX_EVT_DEVICE_FOUND, d.getName(), d.getMacAddress())
-                }
-            }
+        override fun onScanFailed(errorCode: Int) {
+            super.onScanFailed(errorCode)
+            isScanning = false
+            dbgObj.debugPrint(
+                BlueNoxDebug.DebugLevels.BLUENOX_DEBUG_LVL_ERROR,
+                MODULE_TAG,
+                "BLE scan failed with error code: $errorCode",
+            )
+            queueEvent(BluenoxEvents.BLUENOX_EVT_SCAN_STOP, "", "")
         }
     }
 

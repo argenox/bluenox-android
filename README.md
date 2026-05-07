@@ -64,7 +64,7 @@ Example
 
 ```kotlin
 dependencies {
-    implementation("com.argenox:bluenox-android:0.2.52")
+    implementation("com.argenox:bluenox-android:0.2.54")
 }
 ```
 
